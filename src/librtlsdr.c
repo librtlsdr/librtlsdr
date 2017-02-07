@@ -103,8 +103,8 @@ struct rtlsdr_dev {
 	unsigned char **xfer_buf;
 	rtlsdr_read_async_cb_t cb;
 	void *cb_ctx;
-	enum rtlsdr_async_status async_status;
-	int async_cancel;
+	volatile enum rtlsdr_async_status async_status;
+	volatile int async_cancel;
 	/* rtl demod context */
 	uint32_t rate; /* Hz */
 	uint32_t rtl_xtal; /* Hz */
@@ -2234,7 +2234,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 
 	while (RTLSDR_INACTIVE != dev->async_status) {
 		r = libusb_handle_events_timeout_completed(dev->ctx, &tv,
-								 &dev->async_cancel);
+								(int *)&dev->async_cancel);
 		if (r < 0) {
 			/*fprintf(stderr, "handle_events returned: %d\n", r);*/
 			if (r == LIBUSB_ERROR_INTERRUPTED) /* stray signal */
