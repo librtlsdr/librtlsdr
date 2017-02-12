@@ -115,6 +115,10 @@ static double levelSum = 0.0;
 enum trigExpr { crit_IN =0, crit_OUT, crit_LT, crit_GT };
 char * aCritStr[] = { "in", "out", "<", ">" };
 
+time_t stop_time;
+int duration = 0;
+
+
 struct cmd_state
 {
 	const char * filename;
@@ -277,6 +281,7 @@ void usage(void)
 		//"\t	for fm squelch is inverted\n"
 		"\t[-o oversampling (default: 1, 4 recommended)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
+		"\t[-R run_seconds] specify number of seconds to run\n"
 		"\t[-E enable_option (default: none)]\n"
 		"\t	use multiple -E to enable multiple options\n"
 		"\t	edge:   enable lower edge tuning\n"
@@ -1270,11 +1275,18 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	unsigned char sampleMax;
 	uint32_t sampleP, samplePowSum = 0.0;
 	int samplePowCount = 0, step = 2;
+	time_t rawtime;
 
 	if (do_exit) {
 		return;}
 	if (!ctx) {
 		return;}
+	time(&rawtime);
+	if (duration > 0 && rawtime >= stop_time) {
+      do_exit = 1;
+      fprintf(stderr, "Time expired, exiting!\n");
+      rtlsdr_cancel_async(dongle.dev);
+    }
 	if (s->mute) {
 		if(muteLen > (int)len)
 			muteLen = len;
@@ -1704,7 +1716,7 @@ int main(int argc, char **argv)
 	controller_init(&controller);
 	cmd_init(&cmd);
 
-	while ((opt = getopt(argc, argv, "d:f:C:B:m:g:s:b:l:L:o:t:r:p:E:q:F:A:M:c:h:w:W:D:Tnv")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:C:B:m:g:s:b:l:L:o:t:r:p:R:E:q:F:A:M:c:h:w:W:D:Tnv")) != -1) {
 		switch (opt) {
 		case 'd':
 			dongle.dev_index = verbose_device_search(optarg);
@@ -1767,6 +1779,15 @@ int main(int argc, char **argv)
 		case 'p':
 			dongle.ppm_error = atoi(optarg);
 			custom_ppm = 1;
+			break;
+		case 'R':
+			time(&stop_time);
+			duration = atoi(optarg);
+			if (duration < 1) {
+				fprintf(stderr, "Duration '%s' was not positive integer; will continue indefinitely\n", optarg);
+			} else {
+				stop_time += duration;
+			}
 			break;
 		case 'E':
 			if (strcmp("edge",  optarg) == 0) {
