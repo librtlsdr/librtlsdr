@@ -16,14 +16,16 @@ http://sdr.osmocom.org/trac/wiki/rtl-sdr
 
 Pull requests are always welcome but please make changes to, and pull request from, the development branch.
 
-- fork the librtlsdr repo via github
-- clone your fork locally
-- git remote add upstream git@github.com:librtlsdr/librtlsdr.git
-- track the development branch, from within the cloned librtlsdr repo folder run: git branch --track development origin/development
-- checkout the development branch and make changes
+- fork the main librtlsdr repo via github
+- clone your fork locally and cd to the cloned repo's folder
+- add the upstream development repo:
+    * git remote add upstream git@github.com:librtlsdr/librtlsdr.git
+- track the development branch: 
+    * git branch --track development origin/development
+- checkout the development branch and make your changes
 - commit your changes
 - sync your local development branch with the upstream development branch:
-    git fethc upstream
-    git merge upstream/development
+    * git fethc upstream
+    * git merge upstream/development
 - push your commit/s to your forked repo
-- do a pull request from github
+- do a pull request via github
