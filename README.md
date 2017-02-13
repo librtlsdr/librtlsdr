@@ -10,3 +10,20 @@ rtl-sdr turns your Realtek RTL2832 based DVB dongle into a SDR receiver
 # For more information see:
 
 http://sdr.osmocom.org/trac/wiki/rtl-sdr
+
+
+# Contributing
+
+Pull requests are always welcome but please make changes to, and pull request from, the development branch.
+
+- fork the librtlsdr repo via github
+- clone your fork locally
+- git remote add upstream git@github.com:librtlsdr/librtlsdr.git
+- track the development branch, from within the cloned librtlsdr repo folder run: git branch --track development origin/development
+- checkout the development branch and make changes
+- commit your changes
+- sync your local development branch with the upstream development branch:
+    git fethc upstream
+    git merge upstream/development
+- push your commit/s to your forked repo
+- do a pull request from github
