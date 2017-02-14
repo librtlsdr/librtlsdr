@@ -30,7 +30,7 @@ Normal workflow:
 - checkout the development branch and make your changes
 - commit your changes
 - sync your local development branch with the upstream development branch:
-    * git fethc upstream
+    * git fetch upstream
     * git merge upstream/development
 - push your commit/s to your forked repo
 - do a pull request via github
