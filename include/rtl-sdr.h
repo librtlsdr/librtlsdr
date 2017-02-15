@@ -402,7 +402,10 @@ RTLSDR_API int rtlsdr_wait_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, v
 
 /*!
  * Read samples from the device asynchronously. This function will block until
- * it is being canceled using rtlsdr_cancel_async()
+ * it is being canceled using rtlsdr_cancel_async().
+ *
+ * This function allocate needed buffers internally with malloc() call.
+ * Buffers will be released by library.
  *
  * \param dev the device handle given by rtlsdr_open()
  * \param cb callback function to return received samples
@@ -419,6 +422,37 @@ RTLSDR_API int rtlsdr_read_async(rtlsdr_dev_t *dev,
 				 void *ctx,
 				 uint32_t buf_num,
 				 uint32_t buf_len);
+
+/*!
+ * Read samples from the device asynchronously. This function will block until
+ * it is being canceled using rtlsdr_cancel_async(). This function takes
+ * user-provided buffers and don't allocate or free any buffers internally.
+ *
+ * If buffers' parameters are invalid (wrong nuber of buffers or length of
+ * one buffer is not suitable) error is returned immideately. Number of buffers
+ * and length of one buffer are not optional.
+ *
+ * Library will never free buffers provided to this call.
+ *
+ * This call doesn't work via RPC.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param cb callback function to return received samples
+ * \param ctx user specific context to pass via the callback function
+ * \param buf_num buffer count, buf_num * buf_len = overall buffer size.
+ * \param buf_len buffer length, must be multiple of 512,
+ *		  should be a multiple of 16384 (URB size)
+ * \param bufs Array of size buf_num of pointers to buffer, each
+ *             buffer have size if buf_len
+ * 
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_read_async_extbuf(rtlsdr_dev_t *dev,
+				 rtlsdr_read_async_cb_t cb,
+				 void *ctx,
+				 uint32_t buf_num,
+				 uint32_t buf_len,
+				 unsigned char **bufs);
 
 /*!
  * Cancel all pending asynchronous operations on the device.
