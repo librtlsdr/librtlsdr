@@ -34,6 +34,15 @@ Description: Software defined radio receiver for Realtek RTL2832U (library)
  This package contains the shared library.
 EOF
 
+cat <<- EOF > /tmp/librtlsdr0/etc/modprobe.d/rtl-sdr-blacklist.conf
+# This system has librtlsdr0 installed in order to
+# use digital video broadcast receivers as generic
+# software defined radios.
+blacklist dvb_usb_rtl28xxu
+blacklist e4000
+blacklist rtl2832
+EOF
+
 DEB_PKG="librtlsdr0_${VERSION}_i386.deb"
 
 cp -rf ${REPO_DIR}/build/src/lib*so* /tmp/librtlsdr0/usr/lib/i386-linux-gnu/
