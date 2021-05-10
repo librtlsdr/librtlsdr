@@ -44,6 +44,7 @@ typedef int socklen_t;
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <limits.h>
 
 #ifndef _WIN32
 #define min(a, b) (((a) < (b)) ? (a) : (b))
