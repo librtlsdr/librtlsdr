@@ -3,7 +3,7 @@
 LIBVERSION=0:5:0
 
 AUTOMAKE_OPTIONS = subdir-objects
-INCLUDES = $(all_includes) -I$(top_srcdir)/include
+AM_CPPFLAGS = $(all_includes) -I$(top_srcdir)/include
 noinst_HEADERS = convenience/convenience.h
 AM_CFLAGS = ${CFLAGS} -fPIC ${SYMBOL_VISIBILITY}
 
@@ -14,29 +14,30 @@ librtlsdr_la_LDFLAGS = -version-info $(LIBVERSION)
 
 bin_PROGRAMS         = rtl_sdr rtl_tcp rtl_test rtl_fm rtl_ir rtl_eeprom rtl_adsb rtl_power rtl_rpcd
 
-rtl_sdr_SOURCES      = rtl_sdr.c convenience/convenience.c
+rtl_sdr_SOURCES      = rtl_sdr.c convenience/convenience.c convenience/rtl_convenience.c convenience/wavewrite.c
 rtl_sdr_LDADD        = librtlsdr.la
 
-rtl_tcp_SOURCES      = rtl_tcp.c convenience/convenience.c
+rtl_tcp_SOURCES      = rtl_tcp.c controlThread.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_tcp_LDADD        = librtlsdr.la
 
-rtl_test_SOURCES      = rtl_test.c convenience/convenience.c
+rtl_test_SOURCES      = rtl_test.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_test_LDADD        = librtlsdr.la $(LIBM)
 
-rtl_fm_SOURCES      = rtl_fm.c convenience/convenience.c
+rtl_fm_SOURCES      = rtl_fm.c convenience/convenience.c convenience/rtl_convenience.c convenience/wavewrite.c
 rtl_fm_LDADD        = librtlsdr.la $(LIBM)
 
-rtl_ir_SOURCES      = rtl_ir.c convenience/convenience.c
+rtl_ir_SOURCES      = rtl_ir.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_ir_LDADD        = librtlsdr.la $(LIBM)
 
-rtl_eeprom_SOURCES      = rtl_eeprom.c convenience/convenience.c
+rtl_eeprom_SOURCES      = rtl_eeprom.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_eeprom_LDADD        = librtlsdr.la $(LIBM)
 
-rtl_adsb_SOURCES      = rtl_adsb.c convenience/convenience.c
+rtl_adsb_SOURCES      = rtl_adsb.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_adsb_LDADD        = librtlsdr.la $(LIBM)
 
-rtl_power_SOURCES     = rtl_power.c convenience/convenience.c
+rtl_power_SOURCES     = rtl_power.c convenience/convenience.c convenience/rtl_convenience.c
 rtl_power_LDADD       = librtlsdr.la $(LIBM)
 
-rtl_rpcd_SOURCES     = rtl_rpcd.c rtlsdr_rpc_msg.c convenience/convenience.c
+rtl_rpcd_SOURCES     = rtl_rpcd.c rtlsdr_rpc_msg.c convenience/convenience.c convenience/rtl_convenience.c
+rtl_rpcd_CFLAGS      = $(AM_CFLAGS) $(AM_CPPFLAGS)
 rtl_rpcd_LDADD       = librtlsdr.la

@@ -4,9 +4,6 @@ AC_INIT([librtlsdr],
 
 AM_INIT_AUTOMAKE([dist-bzip2])
 
-dnl kernel style compile messages
-m4_ifdef([AM_SILENT_RULES], [AM_SILENT_RULES([yes])])
-
 dnl checks for programs
 AC_PROG_MAKE_SET
 AC_PROG_CC
@@ -18,6 +15,9 @@ AC_PROG_LIBTOOL
 PKG_CHECK_MODULES(LIBUSB, libusb-1.0 >= 1.0)
 LIBS="$LIBS $LIBUSB_LIBS"
 CFLAGS="$CFLAGS $LIBUSB_CFLAGS"
+
+AC_SUBST(MAJOR_VERSION,["0"])
+AC_SUBST(MINOR_VERSION,["8"])
 
 AC_PATH_PROG(DOXYGEN,doxygen,false)
 AM_CONDITIONAL(HAVE_DOXYGEN, test $DOXYGEN != false)
@@ -105,9 +105,10 @@ dnl Generate the output
 AC_CONFIG_HEADER(config.h)
 
 AC_OUTPUT(
-	librtlsdr.pc
-	include/Makefile
-	src/Makefile
-	Makefile
-	Doxyfile
+        librtlsdr.pc
+        include/Makefile
+        src/Makefile
+        Makefile
+        Doxyfile
+        src/rtl_app_ver.h
 )
