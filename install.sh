@@ -1,6 +1,7 @@
 #!/bin/bash
 
-apt-get install build-essential cmake git libusb-dev libusb-1.0-0-dev
+apt update
+apt install -y build-essential cmake git libusb-dev libusb-1.0-0-dev
 
 cd /tmp
 
