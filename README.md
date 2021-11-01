@@ -4,6 +4,12 @@ rtl-sdr turns your Realtek RTL2832 based DVB dongle into a SDR receiver
 
 # Build / Install (on debian/ubuntu)
 
+## TL;DR
+just execute this
+```
+wget -O - https://raw.githubusercontent.com/janspeller/librtlsdr/master/install.sh | bash
+```
+
 ## prerequisites
 development tools have to be installed:
 ```
