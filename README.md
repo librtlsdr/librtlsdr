@@ -10,6 +10,12 @@ just execute this
 wget -O - https://raw.githubusercontent.com/janspeller/librtlsdr/master/install.sh | bash
 ```
 
+and for proxmox usb passthrough add this to the container config (eigther mount specific usb bus or everything)
+```
+lxc.cgroup2.devices.allow: c 189:* rwm
+lxc.mount.entry: /dev/bus/usb/001 dev/bus/usb/001 none bind,optional,create=dir
+```
+
 ## prerequisites
 development tools have to be installed:
 ```
