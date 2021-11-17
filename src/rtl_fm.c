@@ -246,6 +246,11 @@ struct controller_state
 	struct cmd_state *cmd;
 };
 
+typedef struct thread_data {
+   struct dongle_state *dongle;
+   int status;
+} thread_data;
+
 /* multiple of these, eventually */
 struct dongle_state dongle;
 struct demod_state demod;
@@ -1394,9 +1399,13 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 
 static void *dongle_thread_fn(void *arg)
 {
-	struct dongle_state *s = arg;
-	rtlsdr_read_async(s->dev, rtlsdr_callback, s, 0, s->buf_len);
-	return 0;
+	thread_data *tdata = (thread_data *) arg;
+
+	struct dongle_state *s = tdata->dongle;
+	int status = rtlsdr_read_async(s->dev, rtlsdr_callback, s, 0, s->buf_len);
+
+	tdata->status = status;
+	pthread_exit(NULL);
 }
 
 static void *demod_thread_fn(void *arg)
@@ -1822,6 +1831,8 @@ int main(int argc, char **argv)
 	uint32_t ds_temp, ds_threshold = 0;
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
+	int status = 0;
+	thread_data tdata;
 	dongle_init(&dongle);
 	demod_init(&demod);
 	output_init(&output);
@@ -2140,16 +2151,22 @@ int main(int argc, char **argv)
 	usleep(1000000); /* it looks, that startup of dongle level takes some time at startup! */
 	pthread_create(&output.thread, NULL, output_thread_fn, (void *)(&output));
 	pthread_create(&demod.thread, NULL, demod_thread_fn, (void *)(&demod));
-	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
 
-	while (!do_exit) {
-		usleep(100000);
+	tdata.dongle = &dongle;
+
+	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&tdata));
+
+	while (!do_exit && status == 0) {
+		pthread_join(dongle.thread, NULL);
+		status = tdata.status;
 	}
 
 	if (do_exit) {
 		fprintf(stderr, "\nUser cancel, exiting...\n");}
-	else {
-		fprintf(stderr, "\nLibrary error %d, exiting...\n", r);}
+        else {
+		fprintf(stderr, "\nLibrary error %d, exiting...\n", status);
+		return status;
+	}
 
 	rtlsdr_cancel_async(dongle.dev);
 	pthread_join(dongle.thread, NULL);
