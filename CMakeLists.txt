@@ -172,7 +172,19 @@ if (INSTALL_UDEV_RULES)
         )
 else (INSTALL_UDEV_RULES)
     message (STATUS "Udev rules not being installed, install them with -DINSTALL_UDEV_RULES=ON")
+    message (STATUS "  or use 'cmake --build . --target udev_rules'  with root privileges")
 endif (INSTALL_UDEV_RULES)
+
+# allow running only this target with root privileges - without full build
+add_custom_target(udev_rules
+    COMMENT "install udev rules into /etc/udev/rules.d/"
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/rtl-sdr.rules /etc/udev/rules.d/rtl-sdr.rules
+)
+
+add_custom_target(blacklist
+    COMMENT "install module blacklist into /etc/modprobe.d/"
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/rtlsdr-blacklist.conf /etc/modprobe.d/blacklist_rtlsdr.conf
+)
 
 option(DETACH_KERNEL_DRIVER "Detach kernel driver if loaded" OFF)
 if (DETACH_KERNEL_DRIVER)
