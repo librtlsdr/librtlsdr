@@ -20,35 +20,6 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-
-/*
- * written because people could not do real time
- * FM demod on Atom hardware with GNU radio
- * based on rtl_sdr.c and rtl_tcp.c
- *
- * lots of locks, but that is okay
- * (no many-to-many locks)
- *
- * todo:
- *	   sanity checks
- *	   scale squelch to other input parameters
- *	   test all the demodulations
- *	   pad output on hop
- *	   frequency ranges could be stored better
- *	   scaled AM demod amplification
- *	   auto-hop after time limit
- *	   peak detector to tune onto stronger signals
- *	   fifo for active hop frequency
- *	   clips
- *	   noise squelch
- *	   merge stereo patch
- *	   merge soft agc patch
- *	   merge udp patch
- *	   testmode to detect overruns
- *	   watchdog to reset bad dongle
- *	   fix oversampling
- */
-
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
@@ -86,11 +57,9 @@
 #include "convenience/convenience.h"
 #include "convenience/rtl_convenience.h"
 #include "convenience/wavewrite.h"
+#include "demod.h"
 
 #define DEFAULT_SAMPLE_RATE		24000
-#define DEFAULT_BUF_LENGTH		(1 * 16384)
-#define MAXIMUM_OVERSAMPLE		16
-#define MAXIMUM_BUF_LENGTH		(MAXIMUM_OVERSAMPLE * DEFAULT_BUF_LENGTH)
 #define AUTO_GAIN				-100
 #define DEFAULT_BUFFER_DUMP		4096
 
@@ -103,10 +72,6 @@ static int MinCaptureRate = 1000000;
 static volatile int do_exit = 0;
 static int lcm_post[17] = {1,1,1,3,1,5,3,7,1,9,5,11,3,13,7,15,1};
 static int ACTUAL_BUF_LENGTH;
-
-static int *atan_lut = NULL;
-static int atan_lut_size = 131072; /* 512 KB */
-static int atan_lut_coef = 8;
 
 static int verbosity = 0;
 static int printLevels = 0;
@@ -123,6 +88,18 @@ char * aCritStr[] = { "in", "out", "<", ">" };
 time_t stop_time;
 int duration = 0;
 
+
+struct demod_thread_state
+{
+	pthread_t		thread;
+	pthread_rwlock_t	rw;
+	pthread_cond_t		ready;
+	pthread_mutex_t	ready_m;
+	struct output_state	*output_target;
+	struct cmd_state	*cmd;
+
+	struct demod_state demod;
+};
 
 struct cmd_state
 {
@@ -157,7 +134,6 @@ struct cmd_state
 
 struct dongle_state
 {
-	int	  exit_flag;
 	pthread_t thread;
 	rtlsdr_dev_t *dev;
 	int	  dev_index;
@@ -173,53 +149,18 @@ struct dongle_state
 	int	  offset_tuning;
 	int	  direct_sampling;
 	int	  mute;
-	struct demod_state *demod_target;
+	struct demod_thread_state *demod_target;
 	double samplePowSum;
 	int samplePowCount;
 	unsigned char sampleMax;
-};
 
-struct demod_state
-{
-	int	  exit_flag;
-	pthread_t thread;
-	int16_t  lowpassed[MAXIMUM_BUF_LENGTH];
-	int	  lp_len;
-	int16_t  lp_i_hist[10][6];
-	int16_t  lp_q_hist[10][6];
-	int16_t  result[MAXIMUM_BUF_LENGTH];
-	int16_t  droop_i_hist[9];
-	int16_t  droop_q_hist[9];
-	int	  result_len;
-	int	  rate_in;
-	int	  rate_out;
-	int	  rate_out2;
-	int	  now_r, now_j;
-	int	  pre_r, pre_j;
-	int	  prev_index;
-	int	  downsample;	/* min 1, max 256 */
-	int	  post_downsample;
-	int	  output_scale;
-	int	  squelch_level, conseq_squelch, squelch_hits, terminate_on_squelch;
-	int	  downsample_passes;
-	int	  comp_fir_size;
-	int	  custom_atan;
-	int	  deemph, deemph_a;
-	int	  now_lpr;
-	int	  prev_lpr_index;
-	int	  dc_block_audio, dc_avg, adc_block_const;
-	int	  dc_block_raw, dc_avgI, dc_avgQ, rdc_block_const;
-	void	 (*mode_demod)(struct demod_state*);
-	pthread_rwlock_t rw;
-	pthread_cond_t ready;
-	pthread_mutex_t ready_m;
-	struct output_state *output_target;
-	struct cmd_state *cmd;
+	int	  dc_block_raw;	/* flag: activate dc_block_raw_filter() */
+	int	  rdc_avg[2];		/* state for dc_block_raw_filter() */
+	int	  rdc_block_const;	/* parameter for dc_block_raw_filter() */
 };
 
 struct output_state
 {
-	int	  exit_flag;
 	pthread_t thread;
 	FILE	 *file;
 	char	 *filename;
@@ -234,7 +175,6 @@ struct output_state
 
 struct controller_state
 {
-	int	  exit_flag;
 	pthread_t thread;
 	uint32_t freqs[FREQUENCIES_LIMIT];
 	int	  freq_len;
@@ -248,7 +188,7 @@ struct controller_state
 
 /* multiple of these, eventually */
 struct dongle_state dongle;
-struct demod_state demod;
+struct demod_thread_state dm_thr;
 struct output_state output;
 struct controller_state controller;
 struct cmd_state cmd;
@@ -368,136 +308,13 @@ static void sighandler(int signum)
 #define safe_cond_signal(n, m) do { pthread_mutex_lock(m); pthread_cond_signal(n); pthread_mutex_unlock(m); } while (0)
 #define safe_cond_wait(n, m)   do { pthread_mutex_lock(m); pthread_cond_wait(n, m); pthread_mutex_unlock(m); } while (0)
 
-/* {length, coef, coef, coef}  and scaled by 2^15
-   for now, only length 9, optimal way to get +85% bandwidth */
-#define CIC_TABLE_MAX 10
-int cic_9_tables[][10] = {
-	{0,},
-	{9, -156,  -97, 2798, -15489, 61019, -15489, 2798,  -97, -156},
-	{9, -128, -568, 5593, -24125, 74126, -24125, 5593, -568, -128},
-	{9, -129, -639, 6187, -26281, 77511, -26281, 6187, -639, -129},
-	{9, -122, -612, 6082, -26353, 77818, -26353, 6082, -612, -122},
-	{9, -120, -602, 6015, -26269, 77757, -26269, 6015, -602, -120},
-	{9, -120, -582, 5951, -26128, 77542, -26128, 5951, -582, -120},
-	{9, -119, -580, 5931, -26094, 77505, -26094, 5931, -580, -119},
-	{9, -119, -578, 5921, -26077, 77484, -26077, 5921, -578, -119},
-	{9, -119, -577, 5917, -26067, 77473, -26067, 5917, -577, -119},
-	{9, -199, -362, 5303, -25505, 77489, -25505, 5303, -362, -199},
-};
-
 #if defined(_MSC_VER) && (_MSC_VER < 1800)
-double log2(double n)
+static double log2(double n)
 {
 	return log(n) / log(2.0);
 }
 #endif
 
-
-/* uint8_t negation = 255 - x */
-#define NEG_U8( x )     ( 255 - x )
-/* MUL_PLUS_J:    (a + j*b ) * j =  -b + j *  a */
-/* MUL_MINUS_ONE: (a + j*b ) * -1 = -a + j * -b */
-/* MUL_MINUS_J:   (a + j*b ) * -j =  b + j * -a */
-#define MUL_PLUS_J_U8( X, J )	\
-    tmp = X[J]; \
-    X[J] = NEG_U8( X[J+1] ); \
-    X[J+1] = tmp
-
-#define MUL_MINUS_ONE_U8( X, J ) \
-    X[J] = NEG_U8( X[J] ); \
-    X[J+1] = NEG_U8( X[J+1] )
-
-#define MUL_MINUS_J_U8( X, J ) \
-    tmp = X[J]; \
-    X[J] = X[J+1]; \
-    X[J+1] = NEG_U8( tmp )
-
-
-#define MUL_PLUS_J_INT( X, J )	\
-    tmp = X[J]; \
-    X[J] = - X[J+1]; \
-    X[J+1] = tmp
-
-#define MUL_MINUS_ONE_INT( X, J ) \
-    X[J] = - X[J]; \
-    X[J+1] = - X[J+1]
-
-#define MUL_MINUS_J_INT( X, J ) \
-    tmp = X[J]; \
-    X[J] = X[J+1]; \
-    X[J+1] = -tmp
-
-
-void rotate16_90(int16_t *buf, uint32_t len)
-{
-	/* 90 degree rotation is 1, +j, -1, -j */
-	uint32_t i;
-	int16_t tmp;
-	for (i=0; i<len; i+=8) {
-		MUL_PLUS_J_INT( buf, i+2 );
-		MUL_MINUS_ONE_INT( buf, i+4 );
-		MUL_MINUS_J_INT( buf, i+6 );
-	}
-}
-
-void rotate16_neg90(int16_t *buf, uint32_t len)
-{
-	/* -90 degree rotation is 1, -j, -1, +j */
-	uint32_t i;
-	int16_t tmp;
-	for (i=0; i<len; i+=8) {
-		MUL_MINUS_J_INT( buf, i+2 );
-		MUL_MINUS_ONE_INT( buf, i+4 );
-		MUL_PLUS_J_INT( buf, i+6 );
-	}
-}
-
-
-void rotate_90(unsigned char *buf, uint32_t len)
-{
-	/* 90 degree rotation is 1, +j, -1, -j */
-	uint32_t i;
-	unsigned char tmp;
-	for (i=0; i<len; i+=8) {
-		MUL_PLUS_J_U8( buf, i+2 );
-		MUL_MINUS_ONE_U8( buf, i+4 );
-		MUL_MINUS_J_U8( buf, i+6 );
-	}
-}
-
-void rotate_neg90(unsigned char *buf, uint32_t len)
-{
-	/* -90 degree rotation is 1, -j, -1, +j */
-	uint32_t i;
-	unsigned char tmp;
-	for (i=0; i<len; i+=8) {
-		MUL_MINUS_J_U8( buf, 2 );
-		MUL_MINUS_ONE_U8( buf, 4 );
-		MUL_PLUS_J_U8( buf, 6 );
-	}
-}
-
-void low_pass(struct demod_state *d)
-/* simple square window FIR */
-{
-	int i=0, i2=0;
-	while (i < d->lp_len) {
-		d->now_r += d->lowpassed[i];
-		d->now_j += d->lowpassed[i+1];
-		i += 2;
-		d->prev_index++;
-		if (d->prev_index < d->downsample) {
-			continue;
-		}
-		d->lowpassed[i2]   = d->now_r; /* * d->output_scale; */
-		d->lowpassed[i2+1] = d->now_j; /* * d->output_scale; */
-		d->prev_index = 0;
-		d->now_r = 0;
-		d->now_j = 0;
-		i2 += 2;
-	}
-	d->lp_len = i2;
-}
 
 static char * trim(char * s) {
 	char *p = s;
@@ -755,501 +572,23 @@ static void checkTriggerCommand(struct cmd_state *c, unsigned char adcSampleMax,
 }
 
 
-int low_pass_simple(int16_t *signal2, int len, int step)
-/* no wrap around, length must be multiple of step */
+void full_demod(struct demod_thread_state *dt)
 {
-	int i, i2, sum;
-	for(i=0; i < len; i+=step) {
-		sum = 0;
-		for(i2=0; i2<step; i2++) {
-			sum += (int)signal2[i + i2];
-		}
-		/* signal2[i/step] = (int16_t)(sum / step); */
-		signal2[i/step] = (int16_t)(sum);
-	}
-	signal2[i/step + 1] = signal2[i/step];
-	return len / step;
-}
-
-void low_pass_real(struct demod_state *s)
-/* simple square window FIR */
-/* add support for upsampling? */
-{
-	int i=0, i2=0;
-	int fast = (int)s->rate_out;
-	int slow = s->rate_out2;
-	while (i < s->result_len) {
-		s->now_lpr += s->result[i];
-		i++;
-		s->prev_lpr_index += slow;
-		if (s->prev_lpr_index < fast) {
-			continue;
-		}
-		s->result[i2] = (int16_t)(s->now_lpr / (fast/slow));
-		s->prev_lpr_index -= fast;
-		s->now_lpr = 0;
-		i2 += 1;
-	}
-	s->result_len = i2;
-}
-
-void fifth_order(int16_t *data, int length, int16_t *hist)
-/* for half of interleaved data */
-{
-	int i;
-	int16_t a, b, c, d, e, f;
-	a = hist[1];
-	b = hist[2];
-	c = hist[3];
-	d = hist[4];
-	e = hist[5];
-	f = data[0];
-	/* a downsample should improve resolution, so don't fully shift */
-	data[0] = (a + (b+e)*5 + (c+d)*10 + f) >> 4;
-	for (i=4; i<length; i+=4) {
-		a = c;
-		b = d;
-		c = e;
-		d = f;
-		e = data[i-2];
-		f = data[i];
-		data[i/2] = (a + (b+e)*5 + (c+d)*10 + f) >> 4;
-	}
-	/* archive */
-	hist[0] = a;
-	hist[1] = b;
-	hist[2] = c;
-	hist[3] = d;
-	hist[4] = e;
-	hist[5] = f;
-}
-
-void generic_fir(int16_t *data, int length, int *fir, int16_t *hist)
-/* Okay, not at all generic.  Assumes length 9, fix that eventually. */
-{
-	int d, temp, sum;
-	for (d=0; d<length; d+=2) {
-		temp = data[d];
-		sum = 0;
-		sum += (hist[0] + hist[8]) * fir[1];
-		sum += (hist[1] + hist[7]) * fir[2];
-		sum += (hist[2] + hist[6]) * fir[3];
-		sum += (hist[3] + hist[5]) * fir[4];
-		sum +=			hist[4]  * fir[5];
-		data[d] = sum >> 15 ;
-		hist[0] = hist[1];
-		hist[1] = hist[2];
-		hist[2] = hist[3];
-		hist[3] = hist[4];
-		hist[4] = hist[5];
-		hist[5] = hist[6];
-		hist[6] = hist[7];
-		hist[7] = hist[8];
-		hist[8] = temp;
-	}
-}
-
-/* define our own complex math ops
-   because ARMv5 has no hardware float */
-
-void multiply(int ar, int aj, int br, int bj, int *cr, int *cj)
-{
-	*cr = ar*br - aj*bj;
-	*cj = aj*br + ar*bj;
-}
-
-int polar_discriminant(int ar, int aj, int br, int bj)
-{
-	int cr, cj;
-	double angle;
-	multiply(ar, aj, br, -bj, &cr, &cj);
-	angle = atan2((double)cj, (double)cr);
-	return (int)(angle / 3.14159 * (1<<14));
-}
-
-int fast_atan2(int y, int x)
-/* pre scaled for int16 */
-{
-	int yabs, angle;
-	int pi4=(1<<12), pi34=3*(1<<12);  /* note pi = 1<<14 */
-	if (x==0 && y==0) {
-		return 0;
-	}
-	yabs = y;
-	if (yabs < 0) {
-		yabs = -yabs;
-	}
-	if (x >= 0) {
-		angle = pi4  - pi4 * (x-yabs) / (x+yabs);
-	} else {
-		angle = pi34 - pi4 * (x+yabs) / (yabs-x);
-	}
-	if (y < 0) {
-		return -angle;
-	}
-	return angle;
-}
-
-int polar_disc_fast(int ar, int aj, int br, int bj)
-{
-	int cr, cj;
-	multiply(ar, aj, br, -bj, &cr, &cj);
-	return fast_atan2(cj, cr);
-}
-
-int atan_lut_init(void)
-{
-	int i = 0;
-
-	atan_lut = malloc(atan_lut_size * sizeof(int));
-
-	for (i = 0; i < atan_lut_size; i++) {
-		atan_lut[i] = (int) (atan((double) i / (1<<atan_lut_coef)) / 3.14159 * (1<<14));
-	}
-
-	return 0;
-}
-
-int polar_disc_lut(int ar, int aj, int br, int bj)
-{
-	int cr, cj, x, x_abs;
-
-	multiply(ar, aj, br, -bj, &cr, &cj);
-
-	/* special cases */
-	if (cr == 0 || cj == 0) {
-		if (cr == 0 && cj == 0)
-			{return 0;}
-		if (cr == 0 && cj > 0)
-			{return 1 << 13;}
-		if (cr == 0 && cj < 0)
-			{return -(1 << 13);}
-		if (cj == 0 && cr > 0)
-			{return 0;}
-		if (cj == 0 && cr < 0)
-			{return 1 << 14;}
-	}
-
-	/* real range -32768 - 32768 use 64x range -> absolute maximum: 2097152 */
-	x = (cj << atan_lut_coef) / cr;
-	x_abs = abs(x);
-
-	if (x_abs >= atan_lut_size) {
-		/* we can use linear range, but it is not necessary */
-		return (cj > 0) ? 1<<13 : -(1<<13);
-	}
-
-	if (x > 0) {
-		return (cj > 0) ? atan_lut[x] : atan_lut[x] - (1<<14);
-	} else {
-		return (cj > 0) ? (1<<14) - atan_lut[-x] : -atan_lut[-x];
-	}
-
-	return 0;
-}
-
-int esbensen(int ar, int aj, int br, int bj)
-/*
-  input signal: s(t) = a*exp(-i*w*t+p)
-  a = amplitude, w = angular freq, p = phase difference
-  solve w
-  s' = -i(w)*a*exp(-i*w*t+p)
-  s'*conj(s) = -i*w*a*a
-  s'*conj(s) / |s|^2 = -i*w
-*/
-{
-	int cj, dr, dj;
-	int scaled_pi = 2608; /* 1<<14 / (2*pi) */
-	dr = (br - ar) * 2;
-	dj = (bj - aj) * 2;
-	cj = bj*dr - br*dj; /* imag(ds*conj(s)) */
-	return (scaled_pi * cj / (ar*ar+aj*aj+1));
-}
-
-void fm_demod(struct demod_state *fm)
-{
-	int i, pcm;
-	int16_t *lp = fm->lowpassed;
-	pcm = polar_discriminant(lp[0], lp[1],
-		fm->pre_r, fm->pre_j);
-	fm->result[0] = (int16_t)pcm;
-	for (i = 2; i < (fm->lp_len-1); i += 2) {
-		switch (fm->custom_atan) {
-		case 0:
-			pcm = polar_discriminant(lp[i], lp[i+1],
-				lp[i-2], lp[i-1]);
-			break;
-		case 1:
-			pcm = polar_disc_fast(lp[i], lp[i+1],
-				lp[i-2], lp[i-1]);
-			break;
-		case 2:
-			pcm = polar_disc_lut(lp[i], lp[i+1],
-				lp[i-2], lp[i-1]);
-			break;
-		case 3:
-			pcm = esbensen(lp[i], lp[i+1],
-				lp[i-2], lp[i-1]);
-			break;
-		}
-		fm->result[i/2] = (int16_t)pcm;
-	}
-	fm->pre_r = lp[fm->lp_len - 2];
-	fm->pre_j = lp[fm->lp_len - 1];
-	fm->result_len = fm->lp_len/2;
-}
-
-void am_demod(struct demod_state *fm)
-/* todo, fix this extreme laziness */
-{
-	int i, pcm;
-	int16_t *lp = fm->lowpassed;
-	int16_t *r  = fm->result;
-	for (i = 0; i < fm->lp_len; i += 2) {
-		/* hypot uses floats but won't overflow
-		* r[i/2] = (int16_t)hypot(lp[i], lp[i+1]);
-		*/
-		pcm = lp[i] * lp[i];
-		pcm += lp[i+1] * lp[i+1];
-		r[i/2] = (int16_t)sqrt(pcm) * fm->output_scale;
-	}
-	fm->result_len = fm->lp_len/2;
-	/* lowpass? (3khz)  highpass?  (dc) */
-}
-
-void usb_demod(struct demod_state *fm)
-{
-	int i, pcm;
-	int16_t *lp = fm->lowpassed;
-	int16_t *r  = fm->result;
-	for (i = 0; i < fm->lp_len; i += 2) {
-		pcm = lp[i] + lp[i+1];
-		r[i/2] = (int16_t)pcm * fm->output_scale;
-	}
-	fm->result_len = fm->lp_len/2;
-}
-
-void lsb_demod(struct demod_state *fm)
-{
-	int i, pcm;
-	int16_t *lp = fm->lowpassed;
-	int16_t *r  = fm->result;
-	for (i = 0; i < fm->lp_len; i += 2) {
-		pcm = lp[i] - lp[i+1];
-		r[i/2] = (int16_t)pcm * fm->output_scale;
-	}
-	fm->result_len = fm->lp_len/2;
-}
-
-void raw_demod(struct demod_state *fm)
-{
-	int i;
-	for (i = 0; i < fm->lp_len; i++) {
-		fm->result[i] = (int16_t)fm->lowpassed[i];
-	}
-	fm->result_len = fm->lp_len;
-}
-
-void deemph_filter(struct demod_state *fm)
-{
-	static int avg;  /* cheating... */
-	int i, d;
-	/* de-emph IIR
-	 * avg = avg * (1 - alpha) + sample * alpha;
-	 */
-	for (i = 0; i < fm->result_len; i++) {
-		d = fm->result[i] - avg;
-		if (d > 0) {
-			avg += (d + fm->deemph_a/2) / fm->deemph_a;
-		} else {
-			avg += (d - fm->deemph_a/2) / fm->deemph_a;
-		}
-		fm->result[i] = (int16_t)avg;
-	}
-}
-
-void dc_block_audio_filter(struct demod_state *fm)
-{
-	int i, avg;
-	int64_t sum = 0;
-	for (i=0; i < fm->result_len; i++) {
-		sum += fm->result[i];
-	}
-	avg = sum / fm->result_len;
-	avg = (avg + fm->dc_avg * fm->adc_block_const) / ( fm->adc_block_const + 1 );
-	for (i=0; i < fm->result_len; i++) {
-		fm->result[i] -= avg;
-	}
-	fm->dc_avg = avg;
-}
-
-void dc_block_raw_filter(struct demod_state *fm, int16_t *buf, int len)
-{
-	/* derived from dc_block_audio_filter,
-		running over the raw I/Q components
-	*/
-	int i, avgI, avgQ;
-	int64_t sumI = 0;
-	int64_t sumQ = 0;
-	for (i = 0; i < len; i += 2) {
-		sumI += buf[i];
-		sumQ += buf[i+1];
-	}
-	avgI = sumI / ( len / 2 );
-	avgQ = sumQ / ( len / 2 );
-	avgI = (avgI + fm->dc_avgI * fm->rdc_block_const) / ( fm->rdc_block_const + 1 );
-	avgQ = (avgQ + fm->dc_avgQ * fm->rdc_block_const) / ( fm->rdc_block_const + 1 );
-	for (i = 0; i < len; i += 2) {
-		buf[i] -= avgI;
-		buf[i+1] -= avgQ;
-	}
-	fm->dc_avgI = avgI;
-	fm->dc_avgQ = avgQ;
-}
-int mad(int16_t *samples, int len, int step)
-/* mean average deviation */
-{
-	int i=0, sum=0, ave=0;
-	if (len == 0)
-		{return 0;}
-	for (i=0; i<len; i+=step) {
-		sum += samples[i];
-	}
-	ave = sum / (len * step);
-	sum = 0;
-	for (i=0; i<len; i+=step) {
-		sum += abs(samples[i] - ave);
-	}
-	return sum / (len / step);
-}
-
-int rms(int16_t *samples, int len, int step, int omitDCfix)
-/* largely lifted from rtl_power */
-{
-	double dc, err;
-	int i, num;
-	int32_t t, s;
-	uint32_t p;  /* use sign bit to prevent overflow */
-
-	p = 0;
-	t = 0L;
-	while (len > step * 32768) /* 8 bit squared = 16 bit. limit to 2^16 for 32 bit squared sum */
-		++step;  /* increase step to prevent overflow */
-	for (i=0; i<len; i+=step) {
-		s = (long)samples[i];
-		t += s;
-		p += s * s;
-	}
-
-	if (omitDCfix) {
-		/* DC is already corrected. No need to do it again */
-		num = len / step;
-		return (int)sqrt( (double)(p) / num );
-	}
-
-	/* correct for dc offset in squares */
-	dc = (double)(t*step) / (double)len;
-	err = t * 2 * dc - dc * dc * len;
-
-	return (int)sqrt((p-err) / len);
-}
-
-void arbitrary_upsample(int16_t *buf1, int16_t *buf2, int len1, int len2)
-/* linear interpolation, len1 < len2 */
-{
-	int i = 1;
-	int j = 0;
-	int tick = 0;
-	double frac;  /* use integers... */
-	while (j < len2) {
-		frac = (double)tick / (double)len2;
-		buf2[j] = (int16_t)(buf1[i-1]*(1-frac) + buf1[i]*frac);
-		j++;
-		tick += len1;
-		if (tick > len2) {
-			tick -= len2;
-			i++;
-		}
-		if (i >= len1) {
-			i = len1 - 1;
-			tick = len2;
-		}
-	}
-}
-
-void arbitrary_downsample(int16_t *buf1, int16_t *buf2, int len1, int len2)
-/* fractional boxcar lowpass, len1 > len2 */
-{
-	int i = 1;
-	int j = 0;
-	int tick = 0;
-	double remainder = 0;
-	double frac;  /* use integers... */
-	buf2[0] = 0;
-	while (j < len2) {
-		frac = 1.0;
-		if ((tick + len2) > len1) {
-			frac = (double)(len1 - tick) / (double)len2;}
-		buf2[j] += (int16_t)((double)buf1[i] * frac + remainder);
-		remainder = (double)buf1[i] * (1.0-frac);
-		tick += len2;
-		i++;
-		if (tick > len1) {
-			j++;
-			buf2[j] = 0;
-			tick -= len1;
-		}
-		if (i >= len1) {
-			i = len1 - 1;
-			tick = len1;
-		}
-	}
-	for (j=0; j<len2; j++) {
-		buf2[j] = buf2[j] * len2 / len1;}
-}
-
-void arbitrary_resample(int16_t *buf1, int16_t *buf2, int len1, int len2)
-/* up to you to calculate lengths and make sure it does not go OOB
- * okay for buffers to overlap, if you are downsampling */
-{
-	if (len1 < len2) {
-		arbitrary_upsample(buf1, buf2, len1, len2);
-	} else {
-		arbitrary_downsample(buf1, buf2, len1, len2);
-	}
-}
-
-void full_demod(struct demod_state *d)
-{
-	struct cmd_state *c = d->cmd;
+	struct cmd_state *c = dt->cmd;
+	struct demod_state *d = &dt->demod;
 	double freqK, avgRms, rmsLevel, avgRmsLevel;
-	int i, ds_p;
 	int sr = 0;
 	static int printBlockLen = 1;
-	ds_p = d->downsample_passes;
-	if (ds_p) {
-		for (i=0; i < ds_p; i++) {
-			fifth_order(d->lowpassed,   (d->lp_len >> i), d->lp_i_hist[i]);
-			fifth_order(d->lowpassed+1, (d->lp_len >> i) - 1, d->lp_q_hist[i]);
-		}
-		d->lp_len = d->lp_len >> ds_p;
-		/* droop compensation */
-		if (d->comp_fir_size == 9 && ds_p <= CIC_TABLE_MAX) {
-			generic_fir(d->lowpassed, d->lp_len,
-				cic_9_tables[ds_p], d->droop_i_hist);
-			generic_fir(d->lowpassed+1, d->lp_len-1,
-				cic_9_tables[ds_p], d->droop_q_hist);
-		}
-	} else {
-		low_pass(d);
-	}
+
+	downsample_input(d);
+
 	/* power squelch */
 	if (d->squelch_level) {
-		sr = rms(d->lowpassed, d->lp_len, 1, d->dc_block_raw);
+		sr = rms(d->lowpassed, d->lp_len, 1, d->omit_dc_fix);
 		if (sr >= 0) {
 			if (sr < d->squelch_level) {
 				d->squelch_hits++;
-				for (i=0; i<d->lp_len; i++) {
+				for (int i=0; i<d->lp_len; i++) {
 					d->lowpassed[i] = 0;
 				}
 			} else {
@@ -1259,7 +598,7 @@ void full_demod(struct demod_state *d)
 
 	if (printLevels) {
 		if (!sr)
-			sr = rms(d->lowpassed, d->lp_len, 1, d->dc_block_raw);
+			sr = rms(d->lowpassed, d->lp_len, 1, d->omit_dc_fix);
 		--printLevelNo;
 		if (printLevels && sr >= 0) {
 			levelSum += sr;
@@ -1281,7 +620,7 @@ void full_demod(struct demod_state *d)
 
 	if (c->filename) {
 		if (!sr)
-			sr = rms(d->lowpassed, d->lp_len, 1, d->dc_block_raw);
+			sr = rms(d->lowpassed, d->lp_len, 1, d->omit_dc_fix);
 		if ( printBlockLen && verbosity ) {
 			fprintf(stderr, "block length for rms after decimation is %d samples\n", d->lp_len);
 			if ( d->lp_len < 128 )
@@ -1307,7 +646,7 @@ void full_demod(struct demod_state *d)
 	if (d->deemph) {
 		deemph_filter(d);}
 	if (d->dc_block_audio) {
-		dc_block_audio_filter(d);}
+		dc_block_audio_filter(d->result, d->result_len, &(d->adc_avg), d->adc_block_const);}
 	if (d->rate_out2 > 0) {
 		low_pass_real(d);
 		/* arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out); */
@@ -1317,8 +656,8 @@ void full_demod(struct demod_state *d)
 static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 {
 	struct dongle_state *s = ctx;
-	struct demod_state *d = s->demod_target;
-	struct cmd_state *c = d->cmd;
+	struct demod_thread_state *dt = s->demod_target;
+	struct cmd_state *c = dt->cmd;
 	int i, muteLen = s->mute;
 	unsigned char sampleMax;
 	uint32_t sampleP, samplePowSum = 0.0;
@@ -1376,8 +715,8 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		s->buf16[i] = ( (int16_t)buf[i] - 127 );
 	}
 	/* 2nd: do DC filtering BEFORE up-mixing */
-	if (d->dc_block_raw) {
-		dc_block_raw_filter(d, s->buf16, (int)len);
+	if (s->dc_block_raw) {
+		dc_block_raw_filter(s->buf16, (int)len, s->rdc_avg, s->rdc_block_const);
 	}
 	if (muteLen && c->filename)
 		return;	/* "mute" after the dc_block_raw_filter(), giving it time to remove the new DC */
@@ -1385,11 +724,12 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	if (!s->offset_tuning) {
 		rotate16_neg90(s->buf16, (int)len);
 	}
-	pthread_rwlock_wrlock(&d->rw);
-	memcpy(d->lowpassed, s->buf16, 2*len);
-	d->lp_len = len;
-	pthread_rwlock_unlock(&d->rw);
-	safe_cond_signal(&d->ready, &d->ready_m);
+
+	pthread_rwlock_wrlock(&dt->rw);
+	memcpy(dt->demod.lowpassed, s->buf16, 2*len);
+	dt->demod.lp_len = len;
+	pthread_rwlock_unlock(&dt->rw);
+	safe_cond_signal(&dt->ready, &dt->ready_m);
 }
 
 static void *dongle_thread_fn(void *arg)
@@ -1401,17 +741,16 @@ static void *dongle_thread_fn(void *arg)
 
 static void *demod_thread_fn(void *arg)
 {
-	struct demod_state *d = arg;
-	struct output_state *o = d->output_target;
-	struct cmd_state *c = d->cmd;
+	struct demod_thread_state *dt = arg;
+	struct demod_state *d = &dt->demod;
+	struct output_state *o = dt->output_target;
+	struct cmd_state *c = dt->cmd;
 	while (!do_exit) {
-		safe_cond_wait(&d->ready, &d->ready_m);
-		pthread_rwlock_wrlock(&d->rw);
-		full_demod(d);
-		pthread_rwlock_unlock(&d->rw);
-		if (d->exit_flag) {
-			do_exit = 1;
-		}
+		safe_cond_wait(&dt->ready, &dt->ready_m);
+		pthread_rwlock_wrlock(&dt->rw);
+		full_demod(dt);
+		pthread_rwlock_unlock(&dt->rw);
+
 		if (d->squelch_level && d->squelch_hits > d->conseq_squelch) {
 			d->squelch_hits = d->conseq_squelch + 1;  /* hair trigger */
 			safe_cond_signal(&controller.hop, &controller.hop_m);
@@ -1471,11 +810,16 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	uint64_t capture_freq;
 	uint32_t capture_rate;
 	struct dongle_state *d = &dongle;
-	struct demod_state *dm = &demod;
+	struct demod_thread_state *dt = &dm_thr;
+	struct demod_state *dm = &dt->demod;
 	struct controller_state *cs = &controller;
 	dm->downsample = (MinCaptureRate / dm->rate_in) + 1;
 	if (dm->downsample_passes) {
 		dm->downsample_passes = (int)log2(dm->downsample) + 1;
+		if (dm->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
+			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", dm->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
+			dm->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
+		}
 		dm->downsample = 1 << dm->downsample_passes;
 	}
 	if (verbosity >= 2) {
@@ -1514,6 +858,7 @@ static void *controller_thread_fn(void *arg)
 	int32_t if_band_center_freq = 0;
 	struct controller_state *s = arg;
 	struct cmd_state *c = s->cmd;
+	struct demod_state *demod = &dm_thr.demod;
 
 	if (s->wb_mode) {
 		if (verbosity)
@@ -1531,7 +876,7 @@ static void *controller_thread_fn(void *arg)
 		execWaitHop = 0;
 	}
 
-	optimal_settings(s->freqs[0], demod.rate_in);
+	optimal_settings(s->freqs[0], demod->rate_in);
 	if (dongle.direct_sampling) {
 		verbose_direct_sampling(dongle.dev, 1);}
 	if (dongle.offset_tuning) {
@@ -1544,8 +889,8 @@ static void *controller_thread_fn(void *arg)
 			fprintf(stderr, "  frequency is away from parametrized one, to avoid negative impact from dc\n");
 	}
 	verbose_set_frequency(dongle.dev, dongle.freq);
-	fprintf(stderr, "Oversampling input by: %ix.\n", demod.downsample);
-	fprintf(stderr, "Oversampling output by: %ix.\n", demod.post_downsample);
+	fprintf(stderr, "Oversampling input by: %ix.\n", demod->downsample);
+	fprintf(stderr, "Oversampling output by: %ix.\n", demod->post_downsample);
 	fprintf(stderr, "Buffer size: %0.2fms\n",
 		1000 * 0.5 * (float)ACTUAL_BUF_LENGTH / (float)dongle.rate);
 
@@ -1553,14 +898,14 @@ static void *controller_thread_fn(void *arg)
 	if (verbosity)
 		fprintf(stderr, "verbose_set_sample_rate(%.0f Hz)\n", (double)dongle.rate);
 	verbose_set_sample_rate(dongle.dev, dongle.rate);
-	fprintf(stderr, "Output at %u Hz.\n", demod.rate_in/demod.post_downsample);
+	fprintf(stderr, "Output at %u Hz.\n", demod->rate_in/demod->post_downsample);
 
 	if ( dongle.bandwidth ) {
 		if_band_center_freq = dongle.userFreq - dongle.freq;
 		if (dongle.bccorner < 0)
-			if_band_center_freq += ( dongle.bandwidth - demod.rate_out ) / 2;
+			if_band_center_freq += ( dongle.bandwidth - demod->rate_out ) / 2;
 		else if (dongle.bccorner > 0)
-			if_band_center_freq -= ( dongle.bandwidth - demod.rate_out ) / 2;
+			if_band_center_freq -= ( dongle.bandwidth - demod->rate_out ) / 2;
 
 		if ( prev_if_band_center_freq != if_band_center_freq ) {
 			r = rtlsdr_set_tuner_band_center(dongle.dev, if_band_center_freq );
@@ -1584,7 +929,7 @@ static void *controller_thread_fn(void *arg)
 		if (!c->filename) {
 			/* hacky hopping */
 			s->freq_now = (s->freq_now + 1) % s->freq_len;
-			optimal_settings(s->freqs[s->freq_now], demod.rate_in);
+			optimal_settings(s->freqs[s->freq_now], demod->rate_in);
 			rtlsdr_set_center_freq64(dongle.dev, dongle.freq);
 			if ( dongle.bandwidth ) {
 				if_band_center_freq = dongle.userFreq - dongle.freq;
@@ -1606,7 +951,7 @@ static void *controller_thread_fn(void *arg)
 
 			toNextCmdLine(c);
 
-			optimal_settings(c->freq, demod.rate_in);
+			optimal_settings(c->freq, demod->rate_in);
 			/* 1- set center frequency */
 			if (c->prevFreq != dongle.freq) {
 				rtlsdr_set_center_freq64(dongle.dev, dongle.freq);
@@ -1665,9 +1010,9 @@ static void *controller_thread_fn(void *arg)
 			c->levelSum = 0;
 			c->numSummed = 0;
 			/* reset DC filters */
-			demod.dc_avg = 0;
-			demod.dc_avgI = 0;
-			demod.dc_avgQ = 0;
+			demod->adc_avg = 0;
+			dongle.rdc_avg[0] = 0;
+			dongle.rdc_avg[1] = 0;
 			dongle.mute = BufferDump;
 			/* reset adc max and power */
 			dongle.samplePowSum = 0.0;
@@ -1706,50 +1051,31 @@ void dongle_init(struct dongle_state *s)
 	s->mute = 0;
 	s->direct_sampling = 0;
 	s->offset_tuning = 0;
-	s->demod_target = &demod;
+	s->demod_target = &dm_thr;
 	s->samplePowSum = 0.0;
 	s->samplePowCount = 0;
 	s->sampleMax = 0;
 	s->bandwidth = 0;
 	s->bccorner = 0;
 	s->buf_len = 32 * 512;  /* see rtl_tcp */
+
+	s->dc_block_raw = 0;
+	s->rdc_avg[0] = 0;
+	s->rdc_avg[1] = 0;
+	s->rdc_block_const = 9;
 }
 
-void demod_init(struct demod_state *s)
+void demod_thread_init(struct demod_thread_state *s, struct output_state *output, struct cmd_state *cmd)
 {
-	s->rate_in = DEFAULT_SAMPLE_RATE;
-	s->rate_out = DEFAULT_SAMPLE_RATE;
-	s->squelch_level = 0;
-	s->conseq_squelch = 10;
-	s->terminate_on_squelch = 0;
-	s->squelch_hits = 11;
-	s->downsample_passes = 0;
-	s->comp_fir_size = 0;
-	s->prev_index = 0;
-	s->post_downsample = 1;	// once this works, default = 4
-	s->custom_atan = 0;
-	s->deemph = 0;
-	s->rate_out2 = -1;	// flag for disabled
-	s->mode_demod = &fm_demod;
-	s->pre_j = s->pre_r = s->now_r = s->now_j = 0;
-	s->prev_lpr_index = 0;
-	s->deemph_a = 0;
-	s->now_lpr = 0;
-	s->dc_block_audio = 0;
-	s->dc_avg = 0;
-	s->adc_block_const = 9;
-	s->dc_block_raw = 0;
-	s->dc_avgI = 0;
-	s->dc_avgQ = 0;
-	s->rdc_block_const = 9;
+	demod_init(&s->demod);
 	pthread_rwlock_init(&s->rw, NULL);
 	pthread_cond_init(&s->ready, NULL);
 	pthread_mutex_init(&s->ready_m, NULL);
-	s->output_target = &output;
-	s->cmd = &cmd;
+	s->output_target = output;
+	s->cmd = cmd;
 }
 
-void demod_cleanup(struct demod_state *s)
+void demod_thread_cleanup(struct demod_thread_state *s)
 {
 	pthread_rwlock_destroy(&s->rw);
 	pthread_cond_destroy(&s->ready);
@@ -1800,7 +1126,7 @@ void sanity_checks(void)
 		exit(1);
 	}
 
-	if (controller.freq_len > 1 && demod.squelch_level == 0) {
+	if (controller.freq_len > 1 && dm_thr.demod.squelch_level == 0) {
 		fprintf(stderr, "Please specify a squelch level.  Required for scanning multiple frequencies.\n");
 		exit(1);
 	}
@@ -1815,15 +1141,15 @@ int main(int argc, char **argv)
 	int r, opt;
 	int dev_given = 0;
 	int writeWav = 0;
-	int custom_ppm = 0;
 	int enable_biastee = 0;
 	const char * rtlOpts = NULL;
 	enum rtlsdr_ds_mode ds_mode = RTLSDR_DS_IQ;
 	uint32_t ds_temp, ds_threshold = 0;
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
+	struct demod_state *demod = &dm_thr.demod;
 	dongle_init(&dongle);
-	demod_init(&demod);
+	demod_thread_init(&dm_thr, &output, &cmd);
 	output_init(&output);
 	controller_init(&controller);
 	cmd_init(&cmd);
@@ -1847,7 +1173,7 @@ int main(int argc, char **argv)
 			break;
 		case 'C':
 			cmd.filename = optarg;
-			demod.mode_demod = &raw_demod;
+			demod->mode_demod = &raw_demod;
 			break;
 		case 'm':
 			MinCaptureRate = (int)atofs(optarg);
@@ -1862,35 +1188,34 @@ int main(int argc, char **argv)
 			dongle.gain = (int)(atof(optarg) * 10);
 			break;
 		case 'l':
-			demod.squelch_level = (int)atof(optarg);
+			demod->squelch_level = (int)atof(optarg);
 			break;
 		case 'L':
 			printLevels = (int)atof(optarg);
 			break;
 		case 's':
-			demod.rate_in = (uint32_t)atofs(optarg);
-			demod.rate_out = (uint32_t)atofs(optarg);
+			demod->rate_in = (uint32_t)atofs(optarg);
+			demod->rate_out = (uint32_t)atofs(optarg);
 			break;
 		case 'r':
 			output.rate = (int)atofs(optarg);
-			demod.rate_out2 = (int)atofs(optarg);
+			demod->rate_out2 = (int)atofs(optarg);
 			break;
 		case 'o':
 			fprintf(stderr, "Warning: -o is very buggy\n");
-			demod.post_downsample = (int)atof(optarg);
-			if (demod.post_downsample < 1 || demod.post_downsample > MAXIMUM_OVERSAMPLE) {
+			demod->post_downsample = (int)atof(optarg);
+			if (demod->post_downsample < 1 || demod->post_downsample > MAXIMUM_OVERSAMPLE) {
 				fprintf(stderr, "Oversample must be between 1 and %i\n", MAXIMUM_OVERSAMPLE);}
 			break;
 		case 't':
-			demod.conseq_squelch = (int)atof(optarg);
-			if (demod.conseq_squelch < 0) {
-				demod.conseq_squelch = -demod.conseq_squelch;
-				demod.terminate_on_squelch = 1;
+			demod->conseq_squelch = (int)atof(optarg);
+			if (demod->conseq_squelch < 0) {
+				demod->conseq_squelch = -demod->conseq_squelch;
+				demod->terminate_on_squelch = 1;
 			}
 			break;
 		case 'p':
 			dongle.ppm_error = atoi(optarg);
-			custom_ppm = 1;
 			break;
 		case 'R':
 			time(&stop_time);
@@ -1905,11 +1230,11 @@ int main(int argc, char **argv)
 			if (strcmp("edge",  optarg) == 0) {
 				controller.edge = 1;}
 			if (strcmp("dc", optarg) == 0 || strcmp("adc", optarg) == 0) {
-				demod.dc_block_audio = 1;}
+				demod->dc_block_audio = 1;}
 			if (strcmp("rdc", optarg) == 0) {
-				demod.dc_block_raw = 1;}
+				dongle.dc_block_raw = demod->omit_dc_fix = 1;}
 			if (strcmp("deemp",  optarg) == 0) {
-				demod.deemph = 1;}
+				demod->deemph = 1;}
 			if (strcmp("direct",  optarg) == 0) {
 				dongle.direct_sampling = 1;}
 			if (strcmp("offset",  optarg) == 0) {
@@ -1927,45 +1252,45 @@ int main(int argc, char **argv)
 			rtlOpts = optarg;
 			break;
 		case 'q':
-			demod.rdc_block_const = atoi(optarg);
+			dongle.rdc_block_const = atoi(optarg);
 			break;
 		case 'F':
-			demod.downsample_passes = 1;  /* truthy placeholder */
-			demod.comp_fir_size = atoi(optarg);
+			demod->downsample_passes = 1;  /* truthy placeholder */
+			demod->comp_fir_size = atoi(optarg);
 			break;
 		case 'A':
 			if (strcmp("std",  optarg) == 0) {
-				demod.custom_atan = 0;}
+				demod->custom_atan = 0;}
 			if (strcmp("fast", optarg) == 0) {
-				demod.custom_atan = 1;}
+				demod->custom_atan = 1;}
 			if (strcmp("lut",  optarg) == 0) {
 				atan_lut_init();
-				demod.custom_atan = 2;}
+				demod->custom_atan = 2;}
 			if (strcmp("ale", optarg) == 0) {
-				demod.custom_atan = 3;}
+				demod->custom_atan = 3;}
 			break;
 		case 'M':
 			if (strcmp("nbfm",  optarg) == 0 || strcmp("nfm",  optarg) == 0 || strcmp("fm",  optarg) == 0) {
-				demod.mode_demod = &fm_demod;}
+				demod->mode_demod = &fm_demod;}
 			if (strcmp("raw",  optarg) == 0 || strcmp("iq",  optarg) == 0) {
-				demod.mode_demod = &raw_demod;}
+				demod->mode_demod = &raw_demod;}
 			if (strcmp("am",  optarg) == 0) {
-				demod.mode_demod = &am_demod;}
+				demod->mode_demod = &am_demod;}
 			if (strcmp("usb", optarg) == 0) {
-				demod.mode_demod = &usb_demod;}
+				demod->mode_demod = &usb_demod;}
 			if (strcmp("lsb", optarg) == 0) {
-				demod.mode_demod = &lsb_demod;}
+				demod->mode_demod = &lsb_demod;}
 			if (strcmp("wbfm",  optarg) == 0 || strcmp("wfm",  optarg) == 0) {
 				controller.wb_mode = 1;
-				demod.mode_demod = &fm_demod;
-				demod.rate_in = 170000;
-				demod.rate_out = 170000;
-				demod.rate_out2 = 32000;
+				demod->mode_demod = &fm_demod;
+				demod->rate_in = 170000;
+				demod->rate_out = 170000;
+				demod->rate_out2 = 32000;
 				output.rate = 32000;
-				demod.custom_atan = 1;
+				demod->custom_atan = 1;
 				//demod.post_downsample = 4;
-				demod.deemph = 1;
-				demod.squelch_level = 0;}
+				demod->deemph = 1;
+				demod->squelch_level = 0;}
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -2011,15 +1336,15 @@ int main(int argc, char **argv)
 		fprintf(stderr, "verbosity set to %d\n", verbosity);
 
 	/* quadruple sample_rate to limit to Δθ to ±π/2 */
-	demod.rate_in *= demod.post_downsample;
+	demod->rate_in *= demod->post_downsample;
 
 	if (!output.rate) {
-		output.rate = demod.rate_out;}
+		output.rate = demod->rate_out;}
 
 	sanity_checks();
 
 	if (controller.freq_len > 1) {
-		demod.terminate_on_squelch = 0;}
+		demod->terminate_on_squelch = 0;}
 
 	if (optind < argc) {
 		output.filename = argv[optind];
@@ -2027,7 +1352,7 @@ int main(int argc, char **argv)
 		output.filename = "-";
 	}
 
-	ACTUAL_BUF_LENGTH = lcm_post[demod.post_downsample] * DEFAULT_BUF_LENGTH;
+	ACTUAL_BUF_LENGTH = lcm_post[demod->post_downsample] * DEFAULT_BUF_LENGTH;
 
 	if (!dev_given) {
 		dongle.dev_index = verbose_device_search("0");
@@ -2054,9 +1379,9 @@ int main(int argc, char **argv)
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #endif
 
-	if (demod.deemph) {
+	if (demod->deemph) {
 		double tc = (double)timeConstant * 1e-6;
-		demod.deemph_a = (int)round(1.0/((1.0-exp(-1.0/(demod.rate_out * tc)))));
+		demod->deemph_a = (int)round(1.0/((1.0-exp(-1.0/(demod->rate_out * tc)))));
 		if (verbosity)
 			fprintf(stderr, "using wbfm deemphasis filter with time constant %d us\n", timeConstant );
 	}
@@ -2123,8 +1448,8 @@ int main(int argc, char **argv)
 		{
 			fprintf(stderr, "Open %s for write\n", filename_to_open);
 			if (writeWav) {
-				int nChan = (demod.mode_demod == &raw_demod) ? 2 : 1;
-				int srate = (demod.rate_out2 > 0) ? demod.rate_out2 : demod.rate_out;
+				int nChan = (demod->mode_demod == &raw_demod) ? 2 : 1;
+				int srate = (demod->rate_out2 > 0) ? demod->rate_out2 : demod->rate_out;
 				uint32_t f = controller.freqs[0];	/* only 1st frequency!!! */
 				waveWriteHeader(srate, f, 16, nChan, output.file);
 			}
@@ -2139,7 +1464,7 @@ int main(int argc, char **argv)
 	pthread_create(&controller.thread, NULL, controller_thread_fn, (void *)(&controller));
 	usleep(1000000); /* it looks, that startup of dongle level takes some time at startup! */
 	pthread_create(&output.thread, NULL, output_thread_fn, (void *)(&output));
-	pthread_create(&demod.thread, NULL, demod_thread_fn, (void *)(&demod));
+	pthread_create(&dm_thr.thread, NULL, demod_thread_fn, (void *)(&dm_thr));
 	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
 
 	while (!do_exit) {
@@ -2153,15 +1478,15 @@ int main(int argc, char **argv)
 
 	rtlsdr_cancel_async(dongle.dev);
 	pthread_join(dongle.thread, NULL);
-	safe_cond_signal(&demod.ready, &demod.ready_m);
-	pthread_join(demod.thread, NULL);
+	safe_cond_signal(&dm_thr.ready, &dm_thr.ready_m);
+	pthread_join(dm_thr.thread, NULL);
 	safe_cond_signal(&output.ready, &output.ready_m);
 	pthread_join(output.thread, NULL);
 	safe_cond_signal(&controller.hop, &controller.hop_m);
 	pthread_join(controller.thread, NULL);
 
 	/* dongle_cleanup(&dongle); */
-	demod_cleanup(&demod);
+	demod_thread_cleanup(&dm_thr);
 	output_cleanup(&output);
 	controller_cleanup(&controller);
 
