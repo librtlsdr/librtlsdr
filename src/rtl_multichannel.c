@@ -52,6 +52,8 @@
 #include <pthread.h>
 #include <libusb.h>
 
+#include <stdatomic.h>
+
 #include <rtl-sdr.h>
 #include <rtl_app_ver.h>
 #include "convenience/convenience.h"
@@ -62,41 +64,58 @@
 #define DEFAULT_SAMPLE_RATE		24000
 #define AUTO_GAIN				-100
 
-#define FREQUENCIES_LIMIT		64
-#define NUM_CIRCULAR_BUFFERS		4	/* power of 2 ! */
+#define MAX_NUM_CHANNELS		32
+#define NUM_CIRCULAR_BUFFERS		4
+
+#define likely(x)	__builtin_expect(!!(x), 1)
+#define unlikely(x)	__builtin_expect(!!(x), 0)
 
 static int MinCaptureRate = 1000000;
 
 static volatile int do_exit = 0;
 static int verbosity = 0;
 
-
 time_t stop_time;
 int duration = 0;
+
+
+typedef struct I_FILE {
+   FILE *f;
+   char *name;
+} I_FILE;
 
 struct demod_input_buffer
 {
 	int16_t   lowpassed[MAXIMUM_BUF_LENGTH];	/* input and decimated quadrature I/Q sample-pairs */
 	int	  lp_len;		/* number of valid samples in lowpassed[] - NOT quadrature I/Q sample-pairs! */
-	int	  is_free;	/* 0 == free; 1 == occupied with data */
+	atomic_int  is_free;	/* 0 == free; 1 == occupied with data */
 	pthread_rwlock_t	rw;
 };
 
 struct demod_thread_state
 {
+	struct mixer_state mixers[MAX_NUM_CHANNELS];
+	struct demod_state demod_states[MAX_NUM_CHANNELS];
+	struct demod_state *config_demod_state; /* its just for keeping configs */
 
-	struct mixer_state mixers[FREQUENCIES_LIMIT];
-	struct demod_state demods[FREQUENCIES_LIMIT];
-	int	  num_channels;
-
+	pthread_t thread;
+	int channel_count;
 	struct demod_input_buffer	buffers[NUM_CIRCULAR_BUFFERS];
 	int	  buffer_write_idx;
 	int	  buffer_read_idx;
 
-	pthread_t		thread;
-	pthread_cond_t		ready;
-	pthread_mutex_t	ready_m;
-	struct output_state	*output_target;
+	I_FILE     *fptr[MAX_NUM_CHANNELS];
+	I_FILE     *mpx_fptr[MAX_NUM_CHANNELS];
+	char *audio_pipe_command;
+	char *mpx_pipe_command;
+	int split_duration;
+
+	int32_t freqs[MAX_NUM_CHANNELS];
+	uint32_t center_freq;
+
+	pthread_cond_t ready;
+	pthread_mutex_t ready_m;
+	pthread_rwlock_t rw;
 };
 
 struct dongle_state
@@ -120,29 +139,9 @@ struct dongle_state
 	int	  rdc_block_const;	/* parameter for dc_block_raw_filter() */
 };
 
-struct output_state
-{
-	FILE	 *file;
-	char	 *filename;
-	char	 *tempfilename;
-	int16_t  result[MAXIMUM_BUF_LENGTH];
-	int	  result_len;
-	int	  rate;
-};
-
-struct controller_state
-{
-	int32_t   freqs[FREQUENCIES_LIMIT];	/* relative to center_freq */
-	int	  freq_len;
-	uint32_t  center_freq;
-};
-
 /* multiple of these, eventually */
 struct dongle_state dongle;
 struct demod_thread_state dm_thr;
-struct output_state output;
-struct controller_state controller;
-
 
 void usage(void)
 {
@@ -165,6 +164,7 @@ void usage(void)
 		"\t	raw mode outputs 2x16 bit IQ pairs\n"
 		"\t[-m minimum_capture_rate Hz (default: 1m, min=900k, max=3.2m)]\n"
 		"\t[-s sample_rate (default: 24k)]\n"
+		"\t[-t split duration in seconds to split files (default: off)]\n"
 		"\t[-r resample_rate (default: none / same as -s)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
@@ -237,7 +237,57 @@ static double log2(double n)
 #endif
 
 
-void full_demod(struct demod_state *d)
+I_FILE* open_audio_pipe(char *file_name, int demod_id, char* command){
+	I_FILE *ptr = (struct I_FILE*)malloc(sizeof(struct I_FILE));
+	sprintf(file_name, "%d", demod_id);
+	strcat(command, " ");
+	strcat(command, file_name);
+	ptr->f = popen(command, "w");
+	ptr->name = strdup(file_name);
+	return ptr;
+}
+
+I_FILE* open_mpx_pipe(char *file_name, int demod_id, char* command){
+	I_FILE *ptr = (struct I_FILE*)malloc(sizeof(struct I_FILE));
+	sprintf(file_name, "%d-mpx", demod_id);
+	strcat(command, " ");
+	strcat(command, file_name);
+	ptr->f = popen(command, "w");
+	ptr->name = strdup(file_name);
+	return ptr;
+}
+
+char * generate_iq_file_name(char* filename) {
+
+	struct timeval timestamp;
+    time_t current_time;
+	struct tm *tm;
+	char *new_file_name;
+	size_t filename_size;
+	char delim[] = "_";
+	char *ptr = strtok(filename, delim);
+
+	current_time = time(NULL);
+	tm = localtime(&current_time);
+	gettimeofday(&timestamp, NULL);
+	new_file_name = (char *) malloc(100 * sizeof(char));
+	filename_size = sizeof(new_file_name);
+	memset(new_file_name, 0, filename_size);
+	sprintf(new_file_name, "%s_%02d-%02d-%d_%02d:%02d:%02d_%03ld.raw", ptr, tm->tm_mday, tm->tm_mon+1, tm->tm_year+1900, tm->tm_hour, tm->tm_min, tm->tm_sec, timestamp.tv_usec%1000);
+	return new_file_name;
+}
+
+I_FILE * create_iq_file(I_FILE* fptr, const char* filename) {
+	fptr->f = fopen(filename, "w");
+	if(fptr->f == NULL){return NULL;}
+
+	fptr->name = strdup(filename);
+
+	fprintf(stdout, "new file created with name %s\n", filename);
+	return fptr;
+}
+
+void full_demod(struct demod_state *d, FILE *f_mpx, FILE *f_audio)
 {
 	downsample_input(d);
 
@@ -245,6 +295,11 @@ void full_demod(struct demod_state *d)
 	if (d->mode_demod == &raw_demod) {
 		return;
 	}
+
+	if (f_mpx) {
+		fwrite(d->result, 2, d->result_len, f_mpx);
+	}
+
 	/* use nicer filter here too? */
 	if (d->deemph) {
 		deemph_filter(d);}
@@ -254,12 +309,17 @@ void full_demod(struct demod_state *d)
 		low_pass_real(d);
 		/* arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out); */
 	}
+
+	if (f_audio) {
+		fwrite(d->result, 2, d->result_len, f_audio);
+	}
+
 }
 
 static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 {
 	struct dongle_state *s = ctx;
-	struct demod_thread_state *dt = s->demod_target;
+	struct demod_thread_state *mds = s->demod_target;
 	struct demod_input_buffer *buffer;
 	int i, write_idx;
 	time_t rawtime;
@@ -277,6 +337,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	/* OR all samples to allow checking overflow
 	 * - before conversion to 16 bit and before DC filtering.
 	 * we only get bitmask of positive samples (after -127) but that won't matter */
+
 	/* 1st: convert to 16 bit - to allow easier calculation of DC */
 	for (i=0; i<(int)len; i++) {
 		s->buf16[i] = ( (int16_t)buf[i] - 127 );
@@ -286,9 +347,9 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		dc_block_raw_filter(s->buf16, (int)len, s->rdc_avg, s->rdc_block_const);
 	}
 
-	write_idx = dt->buffer_write_idx;
-	dt->buffer_write_idx = (dt->buffer_write_idx + 1) % NUM_CIRCULAR_BUFFERS;
-	buffer = &dt->buffers[write_idx];
+	write_idx = mds->buffer_write_idx;
+	mds->buffer_write_idx = (mds->buffer_write_idx + 1) % NUM_CIRCULAR_BUFFERS;
+	buffer = &mds->buffers[write_idx];
 	pthread_rwlock_wrlock(&buffer->rw);	/* lock before writing into demod_thread_state.lowpassed */
 	if (!buffer->is_free) {
 		do_exit = 1;
@@ -297,11 +358,12 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		pthread_rwlock_unlock(&buffer->rw);
 		return;
 	}
+
 	memcpy(buffer->lowpassed, s->buf16, 2*len);
 	buffer->lp_len = len;
 	buffer->is_free = 0;
 	pthread_rwlock_unlock(&buffer->rw);
-	safe_cond_signal(&dt->ready, &dt->ready_m);
+	safe_cond_signal(&mds->ready, &mds->ready_m);
 }
 
 static void *dongle_thread_fn(void *arg)
@@ -311,61 +373,76 @@ static void *dongle_thread_fn(void *arg)
 	return 0;
 }
 
-static void *demod_thread_fn(void *arg)
+static void *multi_demod_thread_fn(void *arg)
 {
-	struct demod_thread_state *dt = arg;
-	struct demod_state *d0 = &dt->demods[0];
-	struct output_state *o = &output;
-	struct demod_input_buffer *buffer;
-	int ch, read_idx;
-	while (!do_exit) {
-		safe_cond_wait(&dt->ready, &dt->ready_m);
+	struct demod_thread_state *mds = arg;
 
-		read_idx = dt->buffer_read_idx;
-		dt->buffer_read_idx = (dt->buffer_read_idx + 1) % NUM_CIRCULAR_BUFFERS;
-		buffer = &dt->buffers[read_idx];
+	struct timeval t1, t2;
+	struct timeval timestamp;
+	double diff_ms;
+	int ch, read_idx;
+	struct demod_input_buffer *buffer;
+
+	gettimeofday(&t1, NULL);
+	while (!do_exit) {
+		safe_cond_wait(&mds->ready, &mds->ready_m);
+
+		gettimeofday(&t2, NULL);
+		diff_ms = (t2.tv_sec - t1.tv_sec) * 1000.0;
+		diff_ms += (t2.tv_usec - t1.tv_usec) / 1000.0;
+		if (unlikely(mds->split_duration > 0 && diff_ms > 1000.0 * mds->split_duration)) {
+
+			for (int demod_idx=0; demod_idx<mds->channel_count; ++demod_idx) {
+				char* recording_file_name;
+				if (!mds->audio_pipe_command) {
+					recording_file_name = generate_iq_file_name(mds->fptr[demod_idx]->name);
+					fclose(mds->fptr[demod_idx]->f);
+					free(mds->fptr[demod_idx]->name);
+					mds->fptr[demod_idx] = create_iq_file(mds->fptr[demod_idx], recording_file_name);
+				} else {
+					recording_file_name = generate_iq_file_name(mds->fptr[demod_idx]->name);
+					pclose(mds->fptr[demod_idx]->f);
+					free(mds->fptr[demod_idx]); /* free old one */
+					mds->fptr[demod_idx] = open_audio_pipe(recording_file_name, demod_idx, mds->audio_pipe_command);
+				}
+
+				if (!mds->mpx_pipe_command) {
+					recording_file_name = generate_iq_file_name(mds->mpx_fptr[demod_idx]->name);
+					fclose(mds->mpx_fptr[demod_idx]->f);
+					free(mds->mpx_fptr[demod_idx]->name);
+					mds->mpx_fptr[demod_idx] = create_iq_file(mds->mpx_fptr[demod_idx], recording_file_name);
+				} else {
+					recording_file_name = generate_iq_file_name(mds->mpx_fptr[demod_idx]->name);
+					pclose(mds->mpx_fptr[demod_idx]->f);
+					free(mds->mpx_fptr[demod_idx]); /* free old one */
+					mds->mpx_fptr[demod_idx] = open_mpx_pipe(recording_file_name, demod_idx, mds->mpx_pipe_command);
+				}
+				gettimeofday(&t1, NULL);
+				free((void *)recording_file_name);
+			}
+		}
+
+		read_idx = mds->buffer_read_idx;
+		mds->buffer_read_idx = (mds->buffer_read_idx + 1) % NUM_CIRCULAR_BUFFERS;
+		buffer = &mds->buffers[read_idx];
 		pthread_rwlock_wrlock(&buffer->rw);	/* lock before reading into demod_thread_state.lowpassed */
 
-		for (ch = 0; ch < dt->num_channels; ++ch) {
-			dt->demods[ch].lp_len = buffer->lp_len;
-			mixer_apply(&dt->mixers[ch], buffer->lp_len, buffer->lowpassed, dt->demods[ch].lowpassed);
+		for (ch = 0; ch < mds->channel_count; ++ch) {
+			mds->demod_states[ch].lp_len = buffer->lp_len;
+			mixer_apply(&mds->mixers[ch], buffer->lp_len, buffer->lowpassed, mds->demod_states[ch].lowpassed);
 		}
 
 		buffer->is_free = 1;	/* buffer can be written again */
 		/* we only need to lock the lowpassed buffer of demod_thread_state */
 		pthread_rwlock_unlock(&buffer->rw);
 
-		for (ch = 0; ch < dt->num_channels; ++ch) {
-			full_demod(&dt->demods[ch]);
-			/* todo: have a popen() where to post results for each channel */
+		for (ch = 0; ch < mds->channel_count; ++ch) {
+			full_demod(&mds->demod_states[ch], mds->mpx_fptr[ch]->f, mds->fptr[ch]->f);
 		}
 
 		if (do_exit)
 			break;
 
-		/* only write result of 1st channel to file - for now */
-		if (!waveHdrStarted)
-			fwrite(d0->result, 2, d0->result_len, o->file);
-		else
-			waveWriteSamples(o->file, d0->result, d0->result_len, 0);
-	}
-	return 0;
-}
-
-static void *output_fn(void *arg)
-{
-	struct output_state *s = arg;
-	if (!waveHdrStarted) {
-		while (!do_exit) {
-			/* use timedwait and pad out under runs */
-			fwrite(s->result, 2, s->result_len, s->file);
-		}
-	} else {
-		while (!do_exit) {
-			/* use timedwait and pad out under runs */
-			/* distinguish for endianness: wave requires little endian */
-			waveWriteSamples(s->file, s->result, s->result_len, 0);
-		}
 	}
 	return 0;
 }
@@ -378,21 +455,20 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 	uint32_t capture_rate;
 	struct dongle_state *d = &dongle;
 	struct demod_thread_state *dt = &dm_thr;
-	struct demod_state *dm = &dt->demods[0];	/* calculate for 1st one */
-	struct controller_state *cs = &controller;
-	dm->downsample = (MinCaptureRate / dm->rate_in) + 1;
-	if (dm->downsample_passes) {
-		dm->downsample_passes = (int)log2(dm->downsample) + 1;
-		if (dm->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
-			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", dm->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
-			dm->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
+	struct demod_state *config = dt->config_demod_state;
+	config->downsample = (MinCaptureRate / config->rate_in) + 1;
+	if (config->downsample_passes) {
+		config->downsample_passes = (int)log2(config->downsample) + 1;
+		if (config->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
+			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", config->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
+			config->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
 		}
-		dm->downsample = 1 << dm->downsample_passes;
+		config->downsample = 1 << config->downsample_passes;
 	}
 	if (verbosity >= 2) {
-		fprintf(stderr, "downsample_passes = %d (= # of fifth_order() iterations), downsample = %d\n", dm->downsample_passes, dm->downsample );
+		fprintf(stderr, "downsample_passes = %d (= # of fifth_order() iterations), downsample = %d\n", config->downsample_passes, config->downsample );
 	}
-	capture_rate = dm->downsample * dm->rate_in;
+	capture_rate = config->downsample * config->rate_in;
 	if (capture_rate > 3200U*1000U) {
 		fprintf(stderr, "Error: Capture rate of %u Hz exceedds 3200k!\n", (unsigned)capture_rate);
 		return 1;
@@ -401,12 +477,12 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 		fprintf(stderr, "Warning: Capture rate of %u Hz is too big (exceeds 2400k) for continous transfer!\n", (unsigned)capture_rate);
 	}
 	if (verbosity >= 2)
-		fprintf(stderr, "capture_rate = dm->downsample * dm->rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
-	dm->output_scale = (1<<15) / (128 * dm->downsample);
-	if (dm->output_scale < 1) {
-		dm->output_scale = 1;}
-	if (dm->mode_demod == &fm_demod) {
-		dm->output_scale = 1;}
+		fprintf(stderr, "capture_rate = dm->downsample * dm->rate_in = %d * %d = %d\n", config->downsample, config->rate_in, capture_rate );
+	config->output_scale = (1<<15) / (128 * config->downsample);
+	if (config->output_scale < 1) {
+		config->output_scale = 1;}
+	if (config->mode_demod == &fm_demod) {
+		config->output_scale = 1;}
 	d->freq = freq;
 	d->rate = capture_rate;
 	if (verbosity >= 2)
@@ -414,13 +490,13 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 	return 0;
 }
 
-static int controller_fn(struct controller_state *s)
+static int controller_fn(struct demod_thread_state *s)
 {
 	int i, r;
 	int32_t dongle_rate, nyq_min, nyq_max;
-	struct demod_state *demod0 = &dm_thr.demods[0];
+	struct demod_state *demod_config = dm_thr.config_demod_state;
 
-	r = optimal_settings(s->center_freq, demod0->rate_in);
+	r = optimal_settings(s->center_freq, demod_config->rate_in);
 	if (r) {
 		return r;
 	}
@@ -435,7 +511,7 @@ static int controller_fn(struct controller_state *s)
 
 	dongle_rate = dongle.rate;
 	nyq_max = dongle_rate /2;
-	for (i = 0; i < s->freq_len; ++i) {
+	for (i = 0; i < s->channel_count; ++i) {
 		if (s->freqs[i] <= -nyq_max || s->freqs[i] >= nyq_max) {
 			fprintf(stderr, "Warning: frequency for channel %d (=%d Hz) is out of Nyquist band!\n", i, (int)s->freqs[i]);
 			fprintf(stderr, "  nyquist band is from %d .. %d Hz\n", -nyq_max, nyq_max);
@@ -443,14 +519,13 @@ static int controller_fn(struct controller_state *s)
 		mixer_init(&dm_thr.mixers[i], s->freqs[i], dongle.rate);
 		if (i)
 			/* distribute demod setting from 1st to all */
-			demod_copy_fields(&dm_thr.demods[i], demod0);
+			demod_copy_fields(&dm_thr.demod_states[i], demod_config);
 		/* allocate memory per channel */
-		demod_init(&dm_thr.demods[i], 0, 1);
+		demod_init(&dm_thr.demod_states[i], 0, 1);
 	}
-	dm_thr.num_channels = s->freq_len;
-	fprintf(stderr, "Multichannel will demodulate %d channels.\n", dm_thr.num_channels);
+	fprintf(stderr, "Multichannel will demodulate %d channels.\n", dm_thr.channel_count);
 
-	fprintf(stderr, "Oversampling input by: %ix.\n", demod0->downsample);
+	fprintf(stderr, "Oversampling input by: %ix.\n", demod_config->downsample);
 	fprintf(stderr, "Buffer size: %u Bytes == %u quadrature samples == %0.2fms\n",
 		(unsigned)dongle.buf_len,
 		(unsigned)dongle.buf_len / 2,
@@ -460,29 +535,31 @@ static int controller_fn(struct controller_state *s)
 	if (verbosity)
 		fprintf(stderr, "verbose_set_sample_rate(%.0f Hz)\n", (double)dongle.rate);
 	verbose_set_sample_rate(dongle.dev, dongle.rate);
-	fprintf(stderr, "Output at %u Hz.\n", demod0->rate_in/demod0->post_downsample);
+	fprintf(stderr, "Output at %u Hz.\n", demod_config->rate_in/demod_config->post_downsample);
 
 	return 0;
 }
 
-void frequency_range(struct controller_state *s, char *arg)
+void frequency_range(struct demod_thread_state *s, char *arg)
 {
 	char *start, *stop, *step;
-	int i;
+	int32_t i;
 	start = arg;
 	stop = strchr(start, ':') + 1;
 	stop[-1] = '\0';
 	step = strchr(stop, ':') + 1;
 	step[-1] = '\0';
-	for(i=(int)atofs(start); i<=(int)atofs(stop); i+=(int)atofs(step))
+	for(i=(int32_t)atofs(start); i<=(int32_t)atofs(stop); i+=(int32_t)atofs(step))
 	{
-		s->freqs[s->freq_len] = (int32_t)i;
-		s->freq_len++;
-		if (s->freq_len >= FREQUENCIES_LIMIT) {
+		s->freqs[s->channel_count] = i;
+		s->channel_count++;
+		if (s->channel_count >= MAX_NUM_CHANNELS) {
 			break;}
 	}
 	stop[-1] = ':';
 	step[-1] = ':';
+
+	s->channel_count = s->channel_count;
 }
 
 void dongle_init(struct dongle_state *s)
@@ -501,61 +578,104 @@ void dongle_init(struct dongle_state *s)
 	s->rdc_block_const = 9;
 }
 
-void demod_thread_init(struct demod_thread_state *s)
+void init_demods()
 {
-	s->num_channels = 0;
-	for (int ch = 0; ch < FREQUENCIES_LIMIT; ++ch)
-		demod_init(&s->demods[ch], 1, 0);
-
-	for (int idx = 0; idx < NUM_CIRCULAR_BUFFERS; ++idx) {
-		pthread_rwlock_init(&s->buffers[idx].rw, NULL);
-		s->buffers[idx].is_free = 1;
+	struct demod_state *conf = dm_thr.config_demod_state;
+	for(int i=0; i<dm_thr.channel_count; i++) {
+		struct demod_state *s = &dm_thr.demod_states[i];
+		demod_copy_fields(s, conf);
+		demod_init(s, 0, 1);
 	}
+}
+
+void demod_thread_state_init(struct demod_thread_state *s)
+{
+	s->config_demod_state = (struct demod_state *)malloc(sizeof(struct demod_state));
+	demod_init(s->config_demod_state, 1, 0); /* just for config arranging */
+
 	s->buffer_write_idx = 0;
 	s->buffer_read_idx = 0;
+	s->split_duration = -1;
+	s->channel_count = -1;
+
+	for (int i = 0; i < NUM_CIRCULAR_BUFFERS; i++)
+	{
+		pthread_rwlock_init(&s->buffers[i].rw, NULL);
+		s->buffers[i].is_free = 1;
+	}
+	s->mpx_pipe_command = NULL;
+	s->audio_pipe_command = NULL;
+
+	s->center_freq = 100000000;
 
 	pthread_cond_init(&s->ready, NULL);
 	pthread_mutex_init(&s->ready_m, NULL);
 }
 
+void multi_demod_init_fptrs(struct demod_thread_state *s, char* mpx_pipe_command, char* audio_pipe_command)
+{
+	char *file_name;
+	file_name = (char *) malloc(50 * sizeof(char));
+	memset(file_name, 0, 50);
+
+	for(int i=0; i<s->channel_count; i++) {
+		s->fptr[i] = (I_FILE *) malloc(sizeof(struct I_FILE));
+		s->mpx_fptr[i] = (I_FILE *) malloc(sizeof(struct I_FILE));
+		sprintf(file_name, "%d", i);
+
+		if (dm_thr.audio_pipe_command) {
+			s->fptr[i] = open_audio_pipe(file_name, i, audio_pipe_command);
+		} else {
+			s->fptr[i]->f = fopen(generate_iq_file_name(file_name), "wb");
+			s->fptr[i]->name = strdup(file_name);
+		}
+		sprintf(file_name, "%d-mpx", i);
+
+		if (dm_thr.mpx_pipe_command) {
+			s->mpx_fptr[i] = open_mpx_pipe(file_name, i, mpx_pipe_command);
+		} else {
+			s->mpx_fptr[i]->f = fopen(generate_iq_file_name(file_name), "wb");
+			s->mpx_fptr[i]->name = strdup(file_name);
+		}
+	}
+	free(file_name);
+}
+
 void demod_thread_cleanup(struct demod_thread_state *s)
 {
-	for (int ch = 0; ch < FREQUENCIES_LIMIT; ++ch)
-		demod_cleanup(&s->demods[ch]);
-	for (int idx = 0; idx < NUM_CIRCULAR_BUFFERS; ++idx) {
-		pthread_rwlock_destroy(&s->buffers[idx].rw);
-	}
+	pthread_rwlock_destroy(&s->rw);
 	pthread_cond_destroy(&s->ready);
 	pthread_mutex_destroy(&s->ready_m);
-}
+	demod_cleanup(s->config_demod_state);
 
-void output_init(struct output_state *s)
-{
-	s->rate = DEFAULT_SAMPLE_RATE;
-}
+	for(int i=0; i<s->channel_count; i++) {
+		demod_cleanup(&s->demod_states[i]);
+		if (dm_thr.audio_pipe_command) {
+				pclose(s->fptr[i]->f);
+			} else {
+				fclose(s->fptr[i]->f);
+			}
 
-void output_cleanup(struct output_state *s)
-{
-}
-
-void controller_init(struct controller_state *s)
-{
-	s->center_freq = 100000000;
-	s->freq_len = -1;
+			if (dm_thr.mpx_pipe_command) {
+				pclose(s->mpx_fptr[i]->f);
+			} else {
+				fclose(s->mpx_fptr[i]->f);
+			}
+		}
 }
 
 void sanity_checks(void)
 {
-	if (controller.freq_len <= 0) {
+	if (dm_thr.channel_count <= 0) {
 		fprintf(stderr, "Please specify a center frequency (RF) and one more relative frequency\n");
 		exit(1);
 	}
-	else if (controller.freq_len == 1) {
+	else if (dm_thr.channel_count == 1) {
 		fprintf(stderr, "Warning: With only one channel, prefer 'rtl_fm', which will have better performance.\n");
 	}
 
-	if (controller.freq_len >= FREQUENCIES_LIMIT) {
-		fprintf(stderr, "Too many channels, maximum %i.\n", FREQUENCIES_LIMIT);
+	if (dm_thr.channel_count >= MAX_NUM_CHANNELS) {
+		fprintf(stderr, "Too many channels, maximum %i.\n", MAX_NUM_CHANNELS);
 		exit(1);
 	}
 
@@ -568,42 +688,40 @@ int main(int argc, char **argv)
 #endif
 	int r, opt;
 	int dev_given = 0;
-	int writeWav = 0;
 	int enable_biastee = 0;
 	const char * rtlOpts = NULL;
+	struct demod_state *demod = NULL;
 	enum rtlsdr_ds_mode ds_mode = RTLSDR_DS_IQ;
 	uint32_t ds_temp, ds_threshold = 0;
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
-	struct demod_state *demod = &dm_thr.demods[0];	/* prepare settings for 1st demod/channel */
 	dongle_init(&dongle);
-	demod_thread_init(&dm_thr);
-	output_init(&output);
-	controller_init(&controller);
+	demod_thread_state_init(&dm_thr);
+	demod = dm_thr.config_demod_state;
 
-	while ((opt = getopt(argc, argv, "d:f:g:m:s:r:p:R:E:O:F:A:M:hTq:c:w:W:D:Hv")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:g:m:s:t:r:p:R:E:O:F:A:M:hTq:c:w:W:D:t:a:x:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			dongle.dev_index = verbose_device_search(optarg);
 			dev_given = 1;
 			break;
 		case 'f':
-			if (controller.freq_len >= FREQUENCIES_LIMIT) {
+			if (dm_thr.channel_count >= MAX_NUM_CHANNELS) {
 				break;}
 			if (strchr(optarg, ':')) {
-				if ( controller.freq_len == -1 ) {
+				if ( dm_thr.channel_count == -1 ) {
 					fprintf(stderr, "error: 1st frequency parameter must be single frequency\n");
 					exit(1);
 				}
-				frequency_range(&controller, optarg);
+				frequency_range(&dm_thr, optarg);
 			}
 			else
 			{
-				if ( controller.freq_len >= 0 )
-					controller.freqs[controller.freq_len] = (int32_t)atofs(optarg);
+				if ( dm_thr.channel_count >= 0 )
+					dm_thr.freqs[dm_thr.channel_count] = (int32_t)atofs(optarg);
 				else
-					controller.center_freq = (uint32_t)atofs(optarg);
-				controller.freq_len++;
+					dm_thr.center_freq = (int32_t)atofs(optarg);
+				dm_thr.channel_count++;
 			}
 			break;
 		case 'g':
@@ -617,8 +735,10 @@ int main(int argc, char **argv)
 			demod->rate_out = (uint32_t)atofs(optarg);
 			break;
 		case 'r':
-			output.rate = (int)atofs(optarg);
 			demod->rate_out2 = (int)atofs(optarg);
+			break;
+		case 't':
+			dm_thr.split_duration = atoi(optarg);
 			break;
 		case 'p':
 			dongle.ppm_error = atoi(optarg);
@@ -649,6 +769,12 @@ int main(int argc, char **argv)
 			break;
 		case 'q':
 			dongle.rdc_block_const = atoi(optarg);
+			break;
+		case 'a':
+			dm_thr.audio_pipe_command = optarg;
+			break;
+		case 'x':
+			dm_thr.mpx_pipe_command = optarg;
 			break;
 		case 'F':
 			demod->downsample_passes = 1;  /* truthy placeholder */
@@ -681,11 +807,9 @@ int main(int argc, char **argv)
 				demod->rate_in = 170000;
 				demod->rate_out = 170000;
 				demod->rate_out2 = 32000;
-				output.rate = 32000;
 				demod->custom_atan = 1;
-				//demod.post_downsample = 4;
 				demod->deemph = 1;
-				demod->squelch_level = 0;}
+			}
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -704,9 +828,6 @@ int main(int argc, char **argv)
 				ds_mode = (enum rtlsdr_ds_mode)ds_temp;
 			else
 				ds_threshold = ds_temp;
-			break;
-		case 'H':
-			writeWav = 1;
 			break;
 		case 'v':
 			++verbosity;
@@ -729,22 +850,23 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if (demod->deemph) {
+		double tc = (double)timeConstant * 1e-6;
+		demod->deemph_a = (int)round(1.0/((1.0-exp(-1.0/(demod->rate_out * tc)))));
+		if (verbosity)
+			fprintf(stderr, "using wbfm deemphasis filter with time constant %d us\n", timeConstant );
+	}
+
+	multi_demod_init_fptrs(&dm_thr, dm_thr.mpx_pipe_command, dm_thr.audio_pipe_command);
+	init_demods();
+
 	if (verbosity)
 		fprintf(stderr, "verbosity set to %d\n", verbosity);
 
 	/* quadruple sample_rate to limit to Δθ to ±π/2 */
 	demod->rate_in *= demod->post_downsample;
 
-	if (!output.rate) {
-		output.rate = demod->rate_out;}
-
 	sanity_checks();
-
-	if (optind < argc) {
-		output.filename = argv[optind];
-	} else {
-		output.filename = "-";
-	}
 
 	if (!dev_given) {
 		dongle.dev_index = verbose_device_search("0");
@@ -770,13 +892,6 @@ int main(int argc, char **argv)
 #else
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #endif
-
-	if (demod->deemph) {
-		double tc = (double)timeConstant * 1e-6;
-		demod->deemph_a = (int)round(1.0/((1.0-exp(-1.0/(demod->rate_out * tc)))));
-		if (verbosity)
-			fprintf(stderr, "using wbfm deemphasis filter with time constant %d us\n", timeConstant );
-	}
 
 	/* Set the tuner gain */
 	if (dongle.gain == AUTO_GAIN) {
@@ -818,48 +933,17 @@ int main(int argc, char **argv)
 		rtlsdr_set_opt_string(dongle.dev, rtlOpts, verbosity);
 	}
 
-	if (strcmp(output.filename, "-") == 0) { /* Write samples to stdout */
-		output.file = stdout;
-#ifdef _WIN32
-		_setmode(_fileno(output.file), _O_BINARY);
-#endif
-	} else {
-		const char * filename_to_open = output.filename;
-		if (writeWav) {
-			output.tempfilename = malloc( strlen(output.filename)+8 );
-			strcpy(output.tempfilename, output.filename);
-			strcat(output.tempfilename, ".tmp");
-			filename_to_open = output.tempfilename;
-		}
- 		output.file = fopen(filename_to_open, "wb");
-		if (!output.file) {
-			fprintf(stderr, "Failed to open %s\n", filename_to_open);
-			exit(1);
-		}
-		else
-		{
-			fprintf(stderr, "Open %s for write\n", filename_to_open);
-			if (writeWav) {
-				int nChan = (demod->mode_demod == &raw_demod) ? 2 : 1;
-				int srate = (demod->rate_out2 > 0) ? demod->rate_out2 : demod->rate_out;
-				uint32_t f = controller.freqs[0];	/* only 1st frequency!!! */
-				waveWriteHeader(srate, f, 16, nChan, output.file);
-			}
-		}
-	}
-
-	//r = rtlsdr_set_testmode(dongle.dev, 1);
+	/* r = rtlsdr_set_testmode(dongle.dev, 1); */
 
 	/* Reset endpoint before we start reading from it (mandatory) */
 	verbose_reset_buffer(dongle.dev);
 
-	r = controller_fn(&controller);
+	controller_fn(&dm_thr);
 	if (r) {
 		rtlsdr_close(dongle.dev);
 		return 1;
 	}
-	/* usleep(1000000); * it looks, that startup of dongle level takes some time at startup! */
-	pthread_create(&dm_thr.thread, NULL, demod_thread_fn, (void *)(&dm_thr));
+	pthread_create(&dm_thr.thread, NULL, multi_demod_thread_fn, (void *)(&dm_thr));
 	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
 
 	while (!do_exit) {
@@ -878,21 +962,6 @@ int main(int argc, char **argv)
 
 	/* dongle_cleanup(&dongle); */
 	demod_thread_cleanup(&dm_thr);
-
-	if (output.file != stdout) {
-		if (writeWav) {
-			int r;
-			waveFinalizeHeader(output.file);
-			fclose(output.file);
-			remove(output.filename);	/* delete, in case file already exists */
-			r = rename( output.tempfilename, output.filename );	/* #include <stdio.h> */
-			if ( r )
-				fprintf( stderr, "%s: error %d '%s' renaming'%s' to '%s'\n"
-					, argv[0], errno, strerror(errno), output.tempfilename, output.filename );
-		} else {
-			fclose(output.file);
-		}
-	}
 
 	rtlsdr_close(dongle.dev);
 	return r >= 0 ? r : -r;
