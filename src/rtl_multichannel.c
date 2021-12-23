@@ -63,6 +63,7 @@
 #define AUTO_GAIN				-100
 
 #define FREQUENCIES_LIMIT		64
+#define NUM_CIRCULAR_BUFFERS		4	/* power of 2 ! */
 
 static int MinCaptureRate = 1000000;
 
@@ -76,17 +77,29 @@ static int verbosity = 0;
 time_t stop_time;
 int duration = 0;
 
+struct demod_input_buffer
+{
+	int16_t   lowpassed[MAXIMUM_BUF_LENGTH];	/* input and decimated quadrature I/Q sample-pairs */
+	int	  lp_len;		/* number of valid samples in lowpassed[] - NOT quadrature I/Q sample-pairs! */
+	int	  is_free;	/* 0 == free; 1 == occupied with data */
+	pthread_rwlock_t	rw;
+};
 
 struct demod_thread_state
 {
+
+	struct mixer_state mixers[FREQUENCIES_LIMIT];
+	struct demod_state demods[FREQUENCIES_LIMIT];
+	int	  num_channels;
+
+	struct demod_input_buffer	buffers[NUM_CIRCULAR_BUFFERS];
+	int	  buffer_write_idx;
+	int	  buffer_read_idx;
+
 	pthread_t		thread;
-	pthread_rwlock_t	rw;
 	pthread_cond_t		ready;
 	pthread_mutex_t	ready_m;
 	struct output_state	*output_target;
-
-	struct mixer_state mixer;
-	struct demod_state demod;
 };
 
 struct dongle_state
@@ -122,7 +135,7 @@ struct output_state
 
 struct controller_state
 {
-	uint32_t freqs[FREQUENCIES_LIMIT];
+	int32_t   freqs[FREQUENCIES_LIMIT];	/* relative to center_freq */
 	int	  freq_len;
 	uint32_t  center_freq;
 };
@@ -227,10 +240,8 @@ static double log2(double n)
 #endif
 
 
-void full_demod(struct demod_thread_state *dt)
+void full_demod(struct demod_state *d)
 {
-	struct demod_state *d = &dt->demod;
-
 	downsample_input(d);
 
 	d->mode_demod(d);  /* lowpassed -> result */
@@ -252,7 +263,8 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 {
 	struct dongle_state *s = ctx;
 	struct demod_thread_state *dt = s->demod_target;
-	int i;
+	struct demod_input_buffer *buffer;
+	int i, write_idx;
 	time_t rawtime;
 
 	if (do_exit) {
@@ -277,10 +289,21 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		dc_block_raw_filter(s->buf16, (int)len, s->rdc_avg, s->rdc_block_const);
 	}
 
-	pthread_rwlock_wrlock(&dt->rw);
-	memcpy(dt->demod.lowpassed, s->buf16, 2*len);
-	dt->demod.lp_len = len;
-	pthread_rwlock_unlock(&dt->rw);
+	write_idx = dt->buffer_write_idx;
+	dt->buffer_write_idx = (dt->buffer_write_idx + 1) % NUM_CIRCULAR_BUFFERS;
+	buffer = &dt->buffers[write_idx];
+	pthread_rwlock_wrlock(&buffer->rw);	/* lock before writing into demod_thread_state.lowpassed */
+	if (!buffer->is_free) {
+		do_exit = 1;
+		fprintf(stderr, "Overflow of circular input buffers, exiting!\n");
+		rtlsdr_cancel_async(dongle.dev);
+		pthread_rwlock_unlock(&buffer->rw);
+		return;
+	}
+	memcpy(buffer->lowpassed, s->buf16, 2*len);
+	buffer->lp_len = len;
+	buffer->is_free = 0;
+	pthread_rwlock_unlock(&buffer->rw);
 	safe_cond_signal(&dt->ready, &dt->ready_m);
 }
 
@@ -294,28 +317,40 @@ static void *dongle_thread_fn(void *arg)
 static void *demod_thread_fn(void *arg)
 {
 	struct demod_thread_state *dt = arg;
-	struct demod_state *d = &dt->demod;
+	struct demod_state *d0 = &dt->demods[0];
 	struct output_state *o = &output;
+	struct demod_input_buffer *buffer;
+	int ch, read_idx;
 	while (!do_exit) {
 		safe_cond_wait(&dt->ready, &dt->ready_m);
-		pthread_rwlock_wrlock(&dt->rw);
-		/* todo: apply mixer per channel */
-		mixer_apply(&dt->mixer, d->lp_len, d->lowpassed, d->lowpassed);
-		full_demod(dt);
-		pthread_rwlock_unlock(&dt->rw);
+
+		read_idx = dt->buffer_read_idx;
+		dt->buffer_read_idx = (dt->buffer_read_idx + 1) % NUM_CIRCULAR_BUFFERS;
+		buffer = &dt->buffers[read_idx];
+		pthread_rwlock_wrlock(&buffer->rw);	/* lock before reading into demod_thread_state.lowpassed */
+
+		for (ch = 0; ch < dt->num_channels; ++ch) {
+			dt->demods[ch].lp_len = buffer->lp_len;
+			mixer_apply(&dt->mixers[ch], buffer->lp_len, buffer->lowpassed, dt->demods[ch].lowpassed);
+		}
+
+		buffer->is_free = 1;	/* buffer can be written again */
+		/* we only need to lock the lowpassed buffer of demod_thread_state */
+		pthread_rwlock_unlock(&buffer->rw);
+
+		for (ch = 0; ch < dt->num_channels; ++ch) {
+			full_demod(&dt->demods[ch]);
+			/* todo: have a popen() where to post results for each channel */
+		}
 
 		if (do_exit)
 			break;
 
-		/*
-		memcpy(o->result, d->result, 2*d->result_len);
-		o->result_len = d->result_len;
-		*/
-
+		/* only write result of 1st channel to file - for now */
 		if (!waveHdrStarted)
-			fwrite(d->result, 2, d->result_len, o->file);
+			fwrite(d0->result, 2, d0->result_len, o->file);
 		else
-			waveWriteSamples(o->file, d->result, d->result_len, 0);
+			waveWriteSamples(o->file, d0->result, d0->result_len, 0);
 	}
 	return 0;
 }
@@ -346,7 +381,7 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	uint32_t capture_rate;
 	struct dongle_state *d = &dongle;
 	struct demod_thread_state *dt = &dm_thr;
-	struct demod_state *dm = &dt->demod;
+	struct demod_state *dm = &dt->demods[0];	/* calculate for 1st one */
 	struct controller_state *cs = &controller;
 	dm->downsample = (MinCaptureRate / dm->rate_in) + 1;
 	if (dm->downsample_passes) {
@@ -377,10 +412,11 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 static void *controller_fn(void *arg)
 {
 	int i, r;
+	int32_t dongle_rate, nyq_min, nyq_max;
 	struct controller_state *s = arg;
-	struct demod_state *demod = &dm_thr.demod;
+	struct demod_state *demod0 = &dm_thr.demods[0];
 
-	optimal_settings(s->center_freq, demod->rate_in);
+	optimal_settings(s->center_freq, demod0->rate_in);
 	if (dongle.direct_sampling) {
 		verbose_direct_sampling(dongle.dev, 1);}
 
@@ -390,11 +426,24 @@ static void *controller_fn(void *arg)
 	}
 	verbose_set_frequency(dongle.dev, dongle.freq);
 
+	dongle_rate = dongle.rate;
+	nyq_max = dongle_rate /2;
 	for (i = 0; i < s->freq_len; ++i) {
-		mixer_init(&dm_thr.mixer, s->freqs[i], dongle.rate);
+		if (s->freqs[i] <= -nyq_max || s->freqs[i] >= nyq_max) {
+			fprintf(stderr, "Warning: frequency for channel %d (=%d Hz) is out of Nyquist band!\n", i, (int)s->freqs[i]);
+			fprintf(stderr, "  nyquist band is from %d .. %d Hz\n", -nyq_max, nyq_max);
+		}
+		mixer_init(&dm_thr.mixers[i], s->freqs[i], dongle.rate);
+		if (i)
+			/* distribute demod setting from 1st to all */
+			demod_copy_fields(&dm_thr.demods[i], demod0);
+		/* allocate memory per channel */
+		demod_init(&dm_thr.demods[i], 0, 1);
 	}
+	dm_thr.num_channels = s->freq_len;
+	fprintf(stderr, "Multichannel will demodulate %d channels.\n", dm_thr.num_channels);
 
-	fprintf(stderr, "Oversampling input by: %ix.\n", demod->downsample);
+	fprintf(stderr, "Oversampling input by: %ix.\n", demod0->downsample);
 	fprintf(stderr, "Buffer size: %0.2fms\n",
 		1000 * 0.5 * (float)ACTUAL_BUF_LENGTH / (float)dongle.rate);
 
@@ -402,7 +451,7 @@ static void *controller_fn(void *arg)
 	if (verbosity)
 		fprintf(stderr, "verbose_set_sample_rate(%.0f Hz)\n", (double)dongle.rate);
 	verbose_set_sample_rate(dongle.dev, dongle.rate);
-	fprintf(stderr, "Output at %u Hz.\n", demod->rate_in/demod->post_downsample);
+	fprintf(stderr, "Output at %u Hz.\n", demod0->rate_in/demod0->post_downsample);
 
 	return 0;
 }
@@ -418,7 +467,7 @@ void frequency_range(struct controller_state *s, char *arg)
 	step[-1] = '\0';
 	for(i=(int)atofs(start); i<=(int)atofs(stop); i+=(int)atofs(step))
 	{
-		s->freqs[s->freq_len] = (uint32_t)i;
+		s->freqs[s->freq_len] = (int32_t)i;
 		s->freq_len++;
 		if (s->freq_len >= FREQUENCIES_LIMIT) {
 			break;}
@@ -445,15 +494,28 @@ void dongle_init(struct dongle_state *s)
 
 void demod_thread_init(struct demod_thread_state *s)
 {
-	demod_init(&s->demod);
-	pthread_rwlock_init(&s->rw, NULL);
+	s->num_channels = 0;
+	for (int ch = 0; ch < FREQUENCIES_LIMIT; ++ch)
+		demod_init(&s->demods[ch], 1, 0);
+
+	for (int idx = 0; idx < NUM_CIRCULAR_BUFFERS; ++idx) {
+		pthread_rwlock_init(&s->buffers[idx].rw, NULL);
+		s->buffers[idx].is_free = 1;
+	}
+	s->buffer_write_idx = 0;
+	s->buffer_read_idx = 0;
+
 	pthread_cond_init(&s->ready, NULL);
 	pthread_mutex_init(&s->ready_m, NULL);
 }
 
 void demod_thread_cleanup(struct demod_thread_state *s)
 {
-	pthread_rwlock_destroy(&s->rw);
+	for (int ch = 0; ch < FREQUENCIES_LIMIT; ++ch)
+		demod_cleanup(&s->demods[ch]);
+	for (int idx = 0; idx < NUM_CIRCULAR_BUFFERS; ++idx) {
+		pthread_rwlock_destroy(&s->buffers[idx].rw);
+	}
 	pthread_cond_destroy(&s->ready);
 	pthread_mutex_destroy(&s->ready_m);
 }
@@ -479,6 +541,9 @@ void sanity_checks(void)
 		fprintf(stderr, "Please specify a center frequency (RF) and one more relative frequency\n");
 		exit(1);
 	}
+	else if (controller.freq_len == 1) {
+		fprintf(stderr, "Warning: With only one channel, prefer 'rtl_fm', which will have better performance.\n");
+	}
 
 	if (controller.freq_len >= FREQUENCIES_LIMIT) {
 		fprintf(stderr, "Too many channels, maximum %i.\n", FREQUENCIES_LIMIT);
@@ -501,7 +566,7 @@ int main(int argc, char **argv)
 	uint32_t ds_temp, ds_threshold = 0;
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
-	struct demod_state *demod = &dm_thr.demod;
+	struct demod_state *demod = &dm_thr.demods[0];	/* prepare settings for 1st demod/channel */
 	dongle_init(&dongle);
 	demod_thread_init(&dm_thr);
 	output_init(&output);
@@ -526,7 +591,7 @@ int main(int argc, char **argv)
 			else
 			{
 				if ( controller.freq_len >= 0 )
-					controller.freqs[controller.freq_len] = (uint32_t)atofs(optarg);
+					controller.freqs[controller.freq_len] = (int32_t)atofs(optarg);
 				else
 					controller.center_freq = (uint32_t)atofs(optarg);
 				controller.freq_len++;

@@ -954,43 +954,82 @@ static void full_demod_light(struct demod_state *d)
 	}
 }
 
-void demod_init(struct demod_state *s)
+void demod_init(struct demod_state *s, int init_fields, int init_mem)
 {
-	s->comp_fir_size = 0;
+	if (init_fields) {
+		s->lowpassed = NULL;
+		s->result = NULL;
+		s->lp_len = 0;
+		s->result_len = 0;
 
-	s->rate_in = DEFAULT_SAMPLE_RATE;
-	s->rate_out = DEFAULT_SAMPLE_RATE;
-	s->rate_out2 = -1;	// flag for disabled
+		s->comp_fir_size = 0;
 
-	s->downsample = 1;
-	s->downsample_passes = 0;
-	s->post_downsample = 1;	// once this works, default = 4
+		s->rate_in = DEFAULT_SAMPLE_RATE;
+		s->rate_out = DEFAULT_SAMPLE_RATE;
+		s->rate_out2 = -1;	// flag for disabled
 
-	s->squelch_level = 0;
-	s->conseq_squelch = 10;
-	s->terminate_on_squelch = 0;
-	s->squelch_hits = 11;
+		s->downsample = 1;
+		s->downsample_passes = 0;
+		s->post_downsample = 1;	// once this works, default = 4
 
-	s->custom_atan = 0;
-	s->pre_j = s->pre_r = 0;
+		s->squelch_level = 0;
+		s->conseq_squelch = 10;
+		s->terminate_on_squelch = 0;
+		s->squelch_hits = 11;
 
-	s->mode_demod = &fm_demod;
+		s->custom_atan = 0;
+		s->pre_j = s->pre_r = 0;
 
-	s->lp_index = 0;
-	s->lp_sum_r = s->lp_sum_j = 0;
+		s->mode_demod = &fm_demod;
 
-	s->lpr_index = 0;
-	s->lpr_sum = 0;
+		s->lp_index = 0;
+		s->lp_sum_r = s->lp_sum_j = 0;
 
-	s->deemph = 0;
-	s->deemph_a = 0;
-	s->deemph_avg = 0;
+		s->lpr_index = 0;
+		s->lpr_sum = 0;
 
-	s->dc_block_audio = 0;
-	s->adc_avg = 0;
-	s->adc_block_const = 9;
+		s->deemph = 0;
+		s->deemph_a = 0;
+		s->deemph_avg = 0;
 
-	s->omit_dc_fix = 0;
+		s->dc_block_audio = 0;
+		s->adc_avg = 0;
+		s->adc_block_const = 9;
+
+		s->omit_dc_fix = 0;
+	}
+
+	if (init_mem) {
+		s->lowpassed = (int16_t*)malloc( sizeof(int16_t) * MAXIMUM_BUF_LENGTH );
+		s->result = (int16_t*)malloc( sizeof(int16_t) * MAXIMUM_BUF_LENGTH );
+	}
+}
+
+void demod_copy_fields(struct demod_state *dest, struct demod_state *src)
+{
+	/* save memory pointers */
+	int16_t * lowpassed = dest->lowpassed;
+	int16_t * result = dest->result;
+
+	*dest = *src;
+
+	/* restore the pointers */
+	dest->lowpassed = lowpassed;
+	dest->result = result;
+
+}
+
+void demod_cleanup(struct demod_state *s)
+{
+	if (s->lowpassed)
+		free(s->lowpassed);
+	if (s->result)
+		free(s->result);
+
+	s->lowpassed = NULL;
+	s->result = NULL;
+	s->lp_len = 0;
+	s->result_len = 0;
 }
 
 /* vim: tabstop=8:softtabstop=8:shiftwidth=8:noexpandtab */
