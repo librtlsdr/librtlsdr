@@ -70,9 +70,6 @@ static int OutputToStdout = 1;
 static int MinCaptureRate = 1000000;
 
 static volatile int do_exit = 0;
-static int lcm_post[17] = {1,1,1,3,1,5,3,7,1,9,5,11,3,13,7,15,1};
-static int ACTUAL_BUF_LENGTH;
-
 static int verbosity = 0;
 static int printLevels = 0;
 static int printLevelNo = 1;
@@ -891,8 +888,10 @@ static void *controller_thread_fn(void *arg)
 	verbose_set_frequency(dongle.dev, dongle.freq);
 	fprintf(stderr, "Oversampling input by: %ix.\n", demod->downsample);
 	fprintf(stderr, "Oversampling output by: %ix.\n", demod->post_downsample);
-	fprintf(stderr, "Buffer size: %0.2fms\n",
-		1000 * 0.5 * (float)ACTUAL_BUF_LENGTH / (float)dongle.rate);
+	fprintf(stderr, "Buffer size: %u Bytes == %u quadrature samples == %0.2fms\n",
+		(unsigned)dongle.buf_len,
+		(unsigned)dongle.buf_len / 2,
+		1000 * 0.5 * (float)dongle.buf_len / (float)dongle.rate);
 
 	/* Set the sample rate */
 	if (verbosity)
@@ -1322,8 +1321,10 @@ int main(int argc, char **argv)
 			break;
 		case 'W':
 			dongle.buf_len = 512 * atoi(optarg);
-			if (dongle.buf_len > MAXIMUM_BUF_LENGTH)
+			if (dongle.buf_len > MAXIMUM_BUF_LENGTH) {
+				fprintf(stderr, "Warning: limiting buffers from option -W to %d\n", MAXIMUM_BUF_LENGTH / 512);
 				dongle.buf_len = MAXIMUM_BUF_LENGTH;
+			}
 			break;
 		case 'h':
 		case '?':
@@ -1352,8 +1353,6 @@ int main(int argc, char **argv)
 	} else {
 		output.filename = "-";
 	}
-
-	ACTUAL_BUF_LENGTH = lcm_post[demod->post_downsample] * DEFAULT_BUF_LENGTH;
 
 	if (!dev_given) {
 		dongle.dev_index = verbose_device_search("0");
