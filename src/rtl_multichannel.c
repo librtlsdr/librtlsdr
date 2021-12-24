@@ -373,7 +373,7 @@ static void *output_fn(void *arg)
 	return 0;
 }
 
-static void optimal_settings(uint64_t freq, uint32_t rate)
+static int optimal_settings(uint64_t freq, uint32_t rate)
 {
 	/* giant ball of hacks
 	 * seems unable to do a single pass, 2:1
@@ -396,6 +396,13 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 		fprintf(stderr, "downsample_passes = %d (= # of fifth_order() iterations), downsample = %d\n", dm->downsample_passes, dm->downsample );
 	}
 	capture_rate = dm->downsample * dm->rate_in;
+	if (capture_rate > 3200U*1000U) {
+		fprintf(stderr, "Error: Capture rate of %u Hz exceedds 3200k!\n", (unsigned)capture_rate);
+		return 1;
+	}
+	else if (capture_rate > 2400U*1000U) {
+		fprintf(stderr, "Warning: Capture rate of %u Hz is too big (exceeds 2400k) for continous transfer!\n", (unsigned)capture_rate);
+	}
 	if (verbosity >= 2)
 		fprintf(stderr, "capture_rate = dm->downsample * dm->rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
 	dm->output_scale = (1<<15) / (128 * dm->downsample);
@@ -407,16 +414,19 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	d->rate = capture_rate;
 	if (verbosity >= 2)
 		fprintf(stderr, "optimal_settings(freq = %f MHz) delivers freq %f MHz, rate %.0f\n", freq * 1E-6, d->freq * 1E-6, (double)d->rate );
+	return 0;
 }
 
-static void *controller_fn(void *arg)
+static int controller_fn(struct controller_state *s)
 {
 	int i, r;
 	int32_t dongle_rate, nyq_min, nyq_max;
-	struct controller_state *s = arg;
 	struct demod_state *demod0 = &dm_thr.demods[0];
 
-	optimal_settings(s->center_freq, demod0->rate_in);
+	r = optimal_settings(s->center_freq, demod0->rate_in);
+	if (r) {
+		return r;
+	}
 	if (dongle.direct_sampling) {
 		verbose_direct_sampling(dongle.dev, 1);}
 
@@ -844,7 +854,11 @@ int main(int argc, char **argv)
 	/* Reset endpoint before we start reading from it (mandatory) */
 	verbose_reset_buffer(dongle.dev);
 
-	controller_fn(&controller);
+	r = controller_fn(&controller);
+	if (r) {
+		rtlsdr_close(dongle.dev);
+		return 1;
+	}
 	/* usleep(1000000); * it looks, that startup of dongle level takes some time at startup! */
 	pthread_create(&dm_thr.thread, NULL, demod_thread_fn, (void *)(&dm_thr));
 	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
