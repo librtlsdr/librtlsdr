@@ -127,7 +127,6 @@ struct dongle_state
 	uint32_t rate;
 	uint32_t bandwidth;
 	int	  gain;
-	int16_t  buf16[MAXIMUM_BUF_LENGTH];
 	uint32_t buf_len;
 	int	  ppm_error;
 	int	  direct_sampling;
@@ -321,6 +320,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	struct dongle_state *s = ctx;
 	struct demod_thread_state *mds = s->demod_target;
 	struct demod_input_buffer *buffer;
+	int16_t *buf16;
 	int i, write_idx;
 	time_t rawtime;
 
@@ -333,18 +333,6 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		do_exit = 1;
 		fprintf(stderr, "Time expired, exiting!\n");
 		rtlsdr_cancel_async(dongle.dev);
-	}
-	/* OR all samples to allow checking overflow
-	 * - before conversion to 16 bit and before DC filtering.
-	 * we only get bitmask of positive samples (after -127) but that won't matter */
-
-	/* 1st: convert to 16 bit - to allow easier calculation of DC */
-	for (i=0; i<(int)len; i++) {
-		s->buf16[i] = ( (int16_t)buf[i] - 127 );
-	}
-	/* 2nd: do DC filtering BEFORE up-mixing */
-	if (s->dc_block_raw) {
-		dc_block_raw_filter(s->buf16, (int)len, s->rdc_avg, s->rdc_block_const);
 	}
 
 	write_idx = mds->buffer_write_idx;
@@ -359,8 +347,19 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 		return;
 	}
 
-	memcpy(buffer->lowpassed, s->buf16, 2*len);
+	buf16 = buffer->lowpassed;
+
+	/* 1st: convert to 16 bit - to allow easier calculation of DC */
+	for (i=0; i<(int)len; i++) {
+		buf16[i] = ( (int16_t)buf[i] - 127 );
+	}
+	/* 2nd: do DC filtering BEFORE up-mixing */
+	if (s->dc_block_raw) {
+		dc_block_raw_filter(buf16, (int)len, s->rdc_avg, s->rdc_block_const);
+	}
+
 	buffer->lp_len = len;
+
 	buffer->is_free = 0;
 	pthread_rwlock_unlock(&buffer->rw);
 	safe_cond_signal(&mds->ready, &mds->ready_m);
