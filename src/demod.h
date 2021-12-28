@@ -103,6 +103,7 @@ struct demod_state
 
 void demod_init(struct demod_state *s, int init_fields, int init_mem);
 void demod_copy_fields(struct demod_state *dest, struct demod_state *src);
+void demod_copy_config(struct demod_state *s, struct demod_state *conf);
 void demod_cleanup(struct demod_state *s);
 
 void mixer_init(struct mixer_state *mixer, double rel_freq, double samplerate);
