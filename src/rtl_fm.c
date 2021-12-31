@@ -131,7 +131,6 @@ struct cmd_state
 
 struct dongle_state
 {
-	pthread_t thread;
 	rtlsdr_dev_t *dev;
 	int	  dev_index;
 	uint64_t userFreq;
@@ -727,13 +726,6 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	dt->demod.lp_len = len;
 	pthread_rwlock_unlock(&dt->rw);
 	safe_cond_signal(&dt->ready, &dt->ready_m);
-}
-
-static void *dongle_thread_fn(void *arg)
-{
-	struct dongle_state *s = arg;
-	rtlsdr_read_async(s->dev, rtlsdr_callback, s, 0, s->buf_len);
-	return 0;
 }
 
 static void *demod_thread_fn(void *arg)
@@ -1465,11 +1457,8 @@ int main(int argc, char **argv)
 	usleep(1000000); /* it looks, that startup of dongle level takes some time at startup! */
 	pthread_create(&output.thread, NULL, output_thread_fn, (void *)(&output));
 	pthread_create(&dm_thr.thread, NULL, demod_thread_fn, (void *)(&dm_thr));
-	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
 
-	while (!do_exit) {
-		usleep(100000);
-	}
+	rtlsdr_read_async(dongle.dev, rtlsdr_callback, &dongle, 0, dongle.buf_len);
 
 	if (do_exit) {
 		fprintf(stderr, "\nUser cancel, exiting...\n");}
@@ -1477,7 +1466,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "\nLibrary error %d, exiting...\n", r);}
 
 	rtlsdr_cancel_async(dongle.dev);
-	pthread_join(dongle.thread, NULL);
 	safe_cond_signal(&dm_thr.ready, &dm_thr.ready_m);
 	pthread_join(dm_thr.thread, NULL);
 	safe_cond_signal(&output.ready, &output.ready_m);

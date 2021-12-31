@@ -1005,49 +1005,20 @@ void demod_init(struct demod_state *s, int init_fields, int init_mem)
 	}
 }
 
-void demod_copy_fields(struct demod_state *dest, struct demod_state *src)
+void demod_copy_fields(struct demod_state *dest, const struct demod_state *src)
 {
 	/* save memory pointers */
 	int16_t * lowpassed = dest->lowpassed;
 	int16_t * result = dest->result;
 
+	if (dest == src)
+		return;
 	*dest = *src;
 
 	/* restore the pointers */
 	dest->lowpassed = lowpassed;
 	dest->result = result;
 
-}
-
-void demod_copy_config(struct demod_state *s, struct demod_state *conf)
-{
-	s->comp_fir_size = conf->comp_fir_size;
-	s->rate_in = conf->rate_in;
-	s->rate_out = conf->rate_out;
-	s->rate_out2 = conf->rate_out2;
-	s->downsample = conf->downsample;
-	s->downsample_passes = conf->downsample_passes;
-	s->post_downsample = conf->post_downsample;
-	s->squelch_level = conf->squelch_level;
-	s->conseq_squelch = conf->conseq_squelch;
-	s->terminate_on_squelch = conf->terminate_on_squelch;
-	s->squelch_hits = conf->squelch_hits;
-	s->custom_atan = conf->custom_atan;
-	s->pre_j = conf->pre_j;
-	s->pre_r = conf->pre_r;
-	s->mode_demod = conf->mode_demod;
-	s->lp_index = conf->lp_index;
-	s->lp_sum_r = conf->lp_sum_r;
-	s->lp_sum_j = conf->lp_sum_j;
-	s->lpr_index = conf->lpr_index;
-	s->lpr_sum = conf->lpr_sum;
-	s->deemph = conf->deemph;
-	s->deemph_a = conf->deemph_a;
-	s->deemph_avg = conf->deemph_avg;
-	s->dc_block_audio = conf->dc_block_audio;
-	s->adc_avg = conf->adc_avg;
-	s->adc_block_const = conf->adc_block_const;
-	s->omit_dc_fix = conf->omit_dc_fix;
 }
 
 void demod_cleanup(struct demod_state *s)

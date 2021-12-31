@@ -65,17 +65,22 @@
 
 #define DEFAULT_SAMPLE_RATE		24000
 #define AUTO_GAIN				-100
-#define DEFAULT_BUFFER_DUMP		4096
-
-#define FREQUENCIES_LIMIT		64
 
 #define MAX_NUM_CHANNELS        32
-#define NUM_CIRCULAR_BUFFERS    4
+#define MAX_CIRCULAR_BUFFERS    32
 
-#define ONE_SEC_TO_USEC 1000.0
+#define DEFAULT_MPX_PIPE_PATTERN	"redsea -r %sf >%F_%H-%M-%S_%#_ch-%cf_rds.txt"
+#define DEFAULT_MPX_FILE_PATTERN	"%F_%H-%M-%S_%#_ch-%cf_mpx.raw"
+#define DEFAULT_AUDIO_PIPE_PATTERN	"ffmpeg -f s16le -ar %sf -ac 1 -i pipe: -loglevel quiet %F_%H-%M-%S_%#_ch-%cf_audio.mp3"
+#define DEFAULT_AUDIO_FILE_PATTERN	"%F_%H-%M-%S_%#_ch-%cf_audio.raw"
+
+/* type: 0: nothing, 1: file, 2: pipe */
+#define DEFAULT_AUDIO_WRITE_TYPE	1
+#define DEFAULT_MPX_WRITE_TYPE		0
 
 #define likely(x)	__builtin_expect(!!(x), 1)
 #define unlikely(x)	__builtin_expect(!!(x), 0)
+#define ARRAY_LEN(x)	(sizeof(x)/sizeof(x[0]))
 
 static int MinCaptureRate = 1000000;
 
@@ -85,17 +90,9 @@ static int verbosity = 0;
 time_t stop_time;
 int duration = 0;
 
-typedef enum file_extension_t {RAW = 2, TXT = 1, MP3 = 0} FILE_EXTENSION;
-typedef enum signal_type_t {MPX = 1, AUDIO = 0} SIGNAL_TYPE;
-
-typedef struct I_FILE {
-   FILE *f;
-   char *name;
-} I_FILE;
-
 struct demod_input_buffer
 {
-	int16_t   lowpassed[MAXIMUM_BUF_LENGTH];	/* input and decimated quadrature I/Q sample-pairs */
+	int16_t * lowpassed; /* input and decimated quadrature I/Q sample-pairs */
 	int	  lp_len;		/* number of valid samples in lowpassed[] - NOT quadrature I/Q sample-pairs! */
 	atomic_int  is_free;	/* 0 == free; 1 == occupied with data */
 	pthread_rwlock_t	rw;
@@ -105,21 +102,28 @@ struct demod_thread_state
 {
 	struct mixer_state mixers[MAX_NUM_CHANNELS];
 	struct demod_state demod_states[MAX_NUM_CHANNELS];
-	struct demod_state *config_demod_state; /* its just for keeping configs */
 
 	pthread_t thread;
 	int channel_count;
-	struct demod_input_buffer	buffers[NUM_CIRCULAR_BUFFERS];
+	struct demod_input_buffer	buffers[MAX_CIRCULAR_BUFFERS];
+	int	  num_circular_buffers;
 	int	  buffer_write_idx;
 	int	  buffer_read_idx;
 
-	I_FILE     *fptr[MAX_NUM_CHANNELS];
-	I_FILE     *mpx_fptr[MAX_NUM_CHANNELS];
-	char *audio_pipe_command;
-	char *mpx_pipe_command;
-	int audio_write_file;
-	int mpx_write_file;
-	int split_duration;
+	FILE    * faudio[MAX_NUM_CHANNELS];
+	FILE    * fmpx[MAX_NUM_CHANNELS];
+	const char *audio_pipe_pattern;
+	const char *mpx_pipe_pattern;
+	const char *audio_file_pattern;
+	const char *mpx_file_pattern;
+	int audio_write_type;	/* 0: nothing, 1: file, 2: pipe */
+	int mpx_write_type;
+
+	int mpx_split_duration;		/* split file or pipe in seconds */
+	int audio_split_duration;
+
+	int mpx_limit_duration;	/* limit per split in seconds */
+	int audio_limit_duration;
 
 	int32_t freqs[MAX_NUM_CHANNELS];
 	uint32_t center_freq;
@@ -131,7 +135,6 @@ struct demod_thread_state
 
 struct dongle_state
 {
-	pthread_t thread;
 	rtlsdr_dev_t *dev;
 	int	  dev_index;
 	uint64_t freq;
@@ -153,16 +156,6 @@ struct dongle_state
 struct dongle_state dongle;
 struct demod_thread_state dm_thr;
 
-static char * trim(char * s) {
-	char *p = s;
-	int l = strlen(p);
-
-	while(isspace(p[l - 1])) p[--l] = 0;
-	while(*p && isspace(*p)) ++p;
-
-	return p;
-}
-
 void usage(void)
 {
 	fprintf(stderr,
@@ -179,18 +172,24 @@ void usage(void)
 		"\t	ranges supported, -f 118M:137M:25k\n"
 		"\t[-v increase verbosity (default: 0)]\n"
 		"\t[-M modulation (default: fm)]\n"
-		"\t	fm or nbfm or nfm, wbfm or wfm, raw or iq, am, usb, lsb\n"
+		"\t	fm or nbfm or nfm, wbfm or wfm, mwfm, raw or iq, am, usb, lsb\n"
 		"\t	wbfm == -M fm -s 170k -A fast -r 32k -E deemp\n"
+		"\t	mwfm == -M fm -s 171k -r 21375\n"
 		"\t	raw mode outputs 2x16 bit IQ pairs\n"
 		"\t[-m minimum_capture_rate Hz (default: 1m, min=900k, max=3.2m)]\n"
 		"\t[-s sample_rate (default: 24k)]\n"
-		"\t[-t split duration in seconds to split files (default: off)]\n"
-		"\t[-b write audio signal to files (default: off)]\n"
-		"\t[-u write mpx signal to files (default: off)]\n"
-		"\t[-a audio signal pipe/file command (default: off) ie. \" p:ffmpeg >freq_#time#_#freq#.mp3\"  # popen() for audio stream\" between characters in #'s will be replaced with proper values]\n"
-			"\t\t for file writing you must put \"f:\" instead of \"p:\" \n"
-		"\t[-x mpx signal pipe command (default: off) ie. \" p:redsea -r #rate# >rds_#freq#.txt\"  # popen() for mpx stream\" between characters in #'s will be replaced with proper values]\n"
-			"\t\t for file writing you must put \"f:\" instead of \"p:\" \n"
+		"\t[-t [x:|a:]split duration in seconds to split files (default: off)]\n"
+		"\t     x:|a:   split the mpx or audio signal. without that prefix, both are split\n"
+		"\t[-l [x:|a:]limit duration in seconds from (split) begin (default: off)]\n"
+		"\t[-a audio pipe command or file pattern (default: file) with substitutions similar to strftime(), ie.\n"
+		"\t\t\"p:%s\"\n"
+		"\t\t\"a:%s\"\n"
+		"\t\t\"p:\" uses the default pipe pattern, \"f:\" uses the default file pattern, \"n\" deactivates audio output.\n"
+		"\t[-x mpx signal pipe command or file pattern (default: off)\n"
+		"\t\tthe default pipe command pattern: \"p:%s\"\n"
+		"\t\tthe default filename pattern: \"f:%s\"\n"
+		"\t\t  substitutions, additional to strftime(): %%f for frequency, %%kf for frequency in kHz,\n"
+		"\t\t  %%sf for samplerate, %%cf for channel number, and %%# for milliseconds of time\n"
 		"\t[-r resample_rate (default: none / same as -s)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
@@ -199,6 +198,7 @@ void usage(void)
 		"\t[-g tuner_gain (default: automatic)]\n"
 		"\t[-w tuner_bandwidth in Hz (default: automatic)]\n"
 		"\t[-W length of single buffer in units of 512 samples (default: 32 was 256)]\n"
+		"\t[-n number of circular input buffers (default: 4, max: 32)]\n"
 		"\t[-c de-emphasis_time_constant in us for wbfm. 'us' or 'eu' for 75/50 us (default: us)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
 		"\t[-R run_seconds] specify number of seconds to run\n"
@@ -211,16 +211,15 @@ void usage(void)
 		"\t	direct: enable direct sampling (bypasses tuner, uses rtl2832 xtal)\n"
 		"%s"
 		"\t[-q dc_avg_factor for option rdc (default: 9)]\n"
-		"\t[-H write wave Header to file (default: off)]\n"
-		"\t	limitation: only 1st tuned frequency will be written into the header!\n"
-		"\tfilename ('-' means stdout)\n"
-		"\t	omitting the filename also uses stdout\n\n"
+		/* "\t[-H write wave Header to file (default: off)]\n" */
 		"Experimental options:\n"
 		"\t[-F fir_size (default: off)]\n"
 		"\t	enables low-leakage downsample filter\n"
 		"\t	size can be 0 or 9.  0 has bad roll off\n"
 		"\t[-A std/fast/lut/ale choose atan math (default: std)]\n"
 		"\n"
+		, DEFAULT_AUDIO_PIPE_PATTERN, DEFAULT_AUDIO_FILE_PATTERN
+		, DEFAULT_MPX_PIPE_PATTERN, DEFAULT_MPX_FILE_PATTERN
 		, rtlsdr_get_opt_help(1) );
 	exit(1);
 }
@@ -258,79 +257,169 @@ static double log2(double n)
 #endif
 
 
-char * generate_file_name(char* filename, FILE_EXTENSION fe) {
+int strfchannel(char *s, int max, const char * format, const int chno, const uint32_t freq, const unsigned rate, const int milli, const int rep_esc)
+{
+	/* rep_esc == 0: %% is NOT replaced for later call to strftime() */
+	/* replaced strings:
+	 * %f  => frequency in Hz
+	 * %kf => frequency in kHz
+	 * %cf => channel number: 0 ..
+	 * %sf => sample frequency = rate
+	 * %#  => ms
+	 */
+	int r, dest_pos = 0;
+	const int fmt_len = strlen(format);
+	const char escape = '%';
 
-	struct timeval timestamp;
-    time_t current_time;
-	struct tm *tm;
-	char *new_file_name;
-	char delim[] = "_";
-	char *ptr = strtok(filename, delim);
-
-    current_time = time(NULL);
-    tm = localtime(&current_time);
-	gettimeofday(&timestamp, NULL);
-    new_file_name = (char *) malloc(100 * sizeof(char));
-	memset(new_file_name, 0, 100);
-    sprintf(new_file_name, "%s_%02d-%02d-%d_%02d:%02d:%02d:%03ld.", ptr, tm->tm_mday, tm->tm_mon+1, tm->tm_year+1900, tm->tm_hour, tm->tm_min, tm->tm_sec, timestamp.tv_usec%1000);
-	switch (fe){
-		case RAW:
-			strcat(new_file_name, "raw");
+	for (int fmt_pos = 0; fmt_pos < fmt_len; ) {
+		if (dest_pos >= max -1)
 			break;
-		case MP3:
-			strcat(new_file_name, "mp3");
-			break;
-		case TXT:
-			strcat(new_file_name, "txt");
-			break;
+		if (format[fmt_pos] == escape) {
+			if (format[fmt_pos+1] == escape) {
+				if (rep_esc) {
+					s[dest_pos++] = format[fmt_pos++];
+				}
+				else {
+					/* rep_esc == 0: %% is NOT replaced for later call to strftime() */
+					s[dest_pos++] = format[fmt_pos++];
+					s[dest_pos++] = format[fmt_pos++];
+				}
+			}
+			else if (format[fmt_pos+1] == '#') {
+				/* %# : ms */
+				r = snprintf(&s[dest_pos], max - dest_pos, "%03d", milli);
+				dest_pos += r;
+				fmt_pos += 2;
+			}
+			else if (format[fmt_pos+1] == 'f') {
+				/* %f : frequency in Hz */
+				r = snprintf(&s[dest_pos], max - dest_pos, "%u", (unsigned)freq);
+				dest_pos += r;
+				fmt_pos += 2;
+			}
+			else if (format[fmt_pos+1] == 'k' && format[fmt_pos+2] == 'f') {
+				/* %kf : frequency in kHz */
+				r = snprintf(&s[dest_pos], max - dest_pos, "%u", (unsigned)(freq / 1000U));
+				dest_pos += r;
+				fmt_pos += 3;
+			}
+			else if (format[fmt_pos+1] == 'c' && format[fmt_pos+2] == 'f') {
+				/* %cf : channel number: 0 .. */
+				r = snprintf(&s[dest_pos], max - dest_pos, "%d", chno);
+				dest_pos += r;
+				fmt_pos += 3;
+			}
+			else if (format[fmt_pos+1] == 's' && format[fmt_pos+2] == 'f') {
+				/* %sf : sample frequency = rate */
+				r = snprintf(&s[dest_pos], max - dest_pos, "%u", (unsigned)rate);
+				dest_pos += r;
+				fmt_pos += 3;
+			}
+			else {
+				s[dest_pos++] = format[fmt_pos++];
+			}
+		}
+		else {
+			s[dest_pos++] = format[fmt_pos++];
+		}
 	}
-	return new_file_name;
+	s[dest_pos++] = 0;
+	if (max > 0)
+		s[max -1] = 0;
+	return dest_pos;
 }
 
-I_FILE* open_pipe(char *file_name, int demod_id, int freq, char* command, SIGNAL_TYPE st) {
-	I_FILE *ptr = dm_thr.fptr[demod_id];
-	char *t_command;
-	command = trim(command);
-	t_command = (char *) malloc(100 * sizeof(char));
-	memset(t_command, 0, 100);
-	strcat(t_command, command);
-	strcat(t_command, " ");
-	strcat(t_command, file_name);
-	strcat(t_command, " 2>&1");
-	switch (st) {
-		case AUDIO:
-			fprintf(stdout, "audio pipe command: %s \n", t_command);
-			break;
-		case MPX:
-			fprintf(stdout, "mpx pipe command: %s \n", t_command);
-			break;
-		default:
-			fprintf(stdout, "unknown signal type. Exiting...\n");
-			exit(0);
+static FILE * open_pipe(const char *command, const char * st) {
+	FILE *f = popen(command, "w");
+	if (!f) {
+		fprintf(stderr, "Error: Could not open %s pipe for '%s' !\n", st, command);
+		return f;
 	}
-
-
-	ptr->f = popen(t_command, "w");
-	if (!ptr->f) {
-		fprintf(stderr, "error ocurred while opening audio signal pipe. Exiting!");
-		exit(0);
-	}
-	ptr->name = file_name;
-	return ptr;
+	fprintf(stdout, "%s pipe opened: '%s'\n", st, command);
+	return f;
 }
 
-I_FILE * create_iq_file(I_FILE* fptr, const char* filename) {
-    fptr->f = fopen(filename, "w");
-    if(fptr->f == NULL){return NULL;}
+static FILE * create_iq_file(const char* filename, const char * st) {
+	FILE * f = fopen(filename, "wb");
+	if(!f) {
+		fprintf(stderr, "Error: Could not create %s file '%s' !\n", st, filename);
+		return f;
+	}
 
-	fptr->name = strdup(filename);
-
-    fprintf(stdout, "new file created with name %s\n", filename);
-    return fptr;
+	fprintf(stdout, "%s file created: %s\n", st, filename);
+	return f;
 }
+
+void close_all_channel_outputs(struct demod_thread_state *s, int close_mpx, int close_audio)
+{
+	for(int ch = 0; ch < s->channel_count; ++ch) {
+		FILE *f = s->faudio[ch];
+		if (f && close_audio) {
+			fflush(f);
+			if (s->audio_write_type == 2)
+				pclose(f);
+			else if (s->audio_write_type == 1)
+				fclose(f);
+			s->faudio[ch] = NULL;
+		}
+
+		f = s->fmpx[ch];
+		if (f && close_mpx) {
+			fflush(f);
+			if (s->mpx_write_type == 2)
+				pclose(f);
+			else if (s->mpx_write_type == 1)
+				fclose(f);
+			s->fmpx[ch] = NULL;
+		}
+	}
+}
+
+void open_all_mpx_channel_outputs(struct demod_thread_state *s, const unsigned mpx_rate, const struct tm *tm, const int milli)
+{
+	static char fnTmp[1024];
+	static char fnTim[1024];
+
+	for(int ch = 0; ch < s->channel_count; ++ch) {
+		uint32_t freq = s->center_freq + s->freqs[ch];
+
+		if (s->mpx_write_type == 2) {
+			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->mpx_pipe_pattern, ch, freq, mpx_rate, milli, 0);
+			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
+			s->fmpx[ch] = open_pipe(fnTim, "mpx");
+		} else if (s->mpx_write_type == 1) {
+			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->mpx_file_pattern, ch, freq, mpx_rate, milli, 0);
+			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
+			s->fmpx[ch] = create_iq_file(fnTim, "mpx");
+		}
+	}
+}
+
+void open_all_audio_channel_outputs(struct demod_thread_state *s, const unsigned audio_rate, const struct tm *tm, const int milli)
+{
+	static char fnTmp[1024];
+	static char fnTim[1024];
+
+	for(int ch = 0; ch < s->channel_count; ++ch) {
+		uint32_t freq = s->center_freq + s->freqs[ch];
+
+		if (s->audio_write_type == 2) {
+			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->audio_pipe_pattern, ch, freq, audio_rate, milli, 0);
+			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
+			s->faudio[ch] = open_pipe(fnTim, "audio");
+		} else if (s->audio_write_type == 1) {
+			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->audio_file_pattern, ch, freq, audio_rate, milli, 0);
+			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
+			s->faudio[ch] = create_iq_file(fnTim, "audio");
+		}
+	}
+}
+
 
 void full_demod(struct demod_state *d, FILE *f_mpx, FILE *f_audio)
 {
+	int nwritten;
+
 	downsample_input(d);
 
 	d->mode_demod(d);  /* lowpassed -> result */
@@ -339,9 +428,15 @@ void full_demod(struct demod_state *d, FILE *f_mpx, FILE *f_audio)
 	}
 
 	if (f_mpx) {
-		fwrite(d->result, 2, d->result_len, f_mpx);
+		nwritten = (int)fwrite(d->result, 2, d->result_len, f_mpx);
+		if (nwritten != d->result_len)
+			fprintf(stderr, "error writing %d mpx samples .. result %d\n", d->result_len, nwritten);
 	}
 
+	if (!f_audio) {
+		/* no need for audio? */
+		return;
+	}
 	/* use nicer filter here too? */
 	if (d->deemph) {
 		deemph_filter(d);}
@@ -352,10 +447,9 @@ void full_demod(struct demod_state *d, FILE *f_mpx, FILE *f_audio)
 		/* arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out); */
 	}
 
-	if (f_audio) {
-		fwrite(d->result, 2, d->result_len, f_audio);
-	}
-
+	nwritten = (int)fwrite(d->result, 2, d->result_len, f_audio);
+	if (nwritten != d->result_len)
+		fprintf(stderr, "error writing %d audio samples .. result %d\n", d->result_len, nwritten);
 }
 
 static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
@@ -379,7 +473,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	}
 
 	write_idx = mds->buffer_write_idx;
-	mds->buffer_write_idx = (mds->buffer_write_idx + 1) % NUM_CIRCULAR_BUFFERS;
+	mds->buffer_write_idx = (mds->buffer_write_idx + 1) % mds->num_circular_buffers;
 	buffer = &mds->buffers[write_idx];
 	pthread_rwlock_wrlock(&buffer->rw);	/* lock before writing into demod_thread_state.lowpassed */
 	if (!buffer->is_free) {
@@ -408,67 +502,68 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	safe_cond_signal(&mds->ready, &mds->ready_m);
 }
 
-static void *dongle_thread_fn(void *arg)
-{
-	struct dongle_state *s = arg;
-	rtlsdr_read_async(s->dev, rtlsdr_callback, s, 0, s->buf_len);
-	return 0;
-}
-
 static void *multi_demod_thread_fn(void *arg)
 {
 	struct demod_thread_state *mds = arg;
 
-	struct timeval t1, t2;
+	struct timeval t1_mpx, t1_audio, t2;
 	struct timeval timestamp;
-	double diff_ms;
+	double diff_ms_mpx, diff_ms_audio;
 	int ch, read_idx;
+	int init_open = 1;
+	int mpx_is_limited = 1;
+	int audio_is_limited = 1;
+	const unsigned mpx_rate = mds->demod_states[0].rate_out;
+	const unsigned audio_rate = mds->demod_states[0].rate_out2 ? (unsigned)mds->demod_states[0].rate_out2 : mpx_rate;
 	struct demod_input_buffer *buffer;
 
-	gettimeofday(&t1, NULL);
+	gettimeofday(&t1_mpx, NULL);
+	t1_audio = t1_mpx;
 	while (!do_exit) {
 		safe_cond_wait(&mds->ready, &mds->ready_m);
 
 		gettimeofday(&t2, NULL);
-		diff_ms = (t2.tv_sec - t1.tv_sec) * 1000.0;
-		diff_ms += (t2.tv_usec - t1.tv_usec) / 1000.0;
-		if (unlikely(mds->split_duration > 0 && diff_ms > 1000.0 * mds->split_duration)) {
-			for (int demod_idx=0; demod_idx<mds->channel_count; ++demod_idx) {
-				char* recording_file_name;
-				int freq;
+		diff_ms_mpx    = (t2.tv_sec  - t1_mpx.tv_sec) * 1000.0;
+		diff_ms_mpx   += (t2.tv_usec - t1_mpx.tv_usec) / 1000.0;
+		diff_ms_audio  = (t2.tv_sec  - t1_audio.tv_sec) * 1000.0;
+		diff_ms_audio += (t2.tv_usec - t1_audio.tv_usec) / 1000.0;
 
-				freq = (mds->center_freq + mds->freqs[demod_idx])/10000;
-				if (!mds->audio_pipe_command) {
-					recording_file_name = generate_file_name(mds->fptr[demod_idx]->name, RAW);
-					fclose(mds->fptr[demod_idx]->f);
-					free(mds->fptr[demod_idx]->name);
-					mds->fptr[demod_idx] = create_iq_file(mds->fptr[demod_idx], recording_file_name);
-				} else {
-					recording_file_name = generate_file_name(mds->fptr[demod_idx]->name, MP3);
-					pclose(mds->fptr[demod_idx]->f);
-					free(mds->fptr[demod_idx]); //free old one
-					mds->fptr[demod_idx] = open_pipe(recording_file_name, demod_idx, freq, mds->audio_pipe_command, AUDIO);
-				}
-
-				if (!mds->mpx_pipe_command) {
-					recording_file_name = generate_file_name(mds->mpx_fptr[demod_idx]->name, RAW);
-					fflush(mds->mpx_fptr[demod_idx]->f);
-					fclose(mds->mpx_fptr[demod_idx]->f);
-					free(mds->mpx_fptr[demod_idx]->name);
-					mds->mpx_fptr[demod_idx] = create_iq_file(mds->mpx_fptr[demod_idx], recording_file_name);
-				} else {
-					recording_file_name = generate_file_name(mds->mpx_fptr[demod_idx]->name, TXT);
-					pclose(mds->mpx_fptr[demod_idx]->f);
-					free(mds->mpx_fptr[demod_idx]); /* free old one */
-					mds->mpx_fptr[demod_idx] = open_pipe(recording_file_name, demod_idx, freq, mds->mpx_pipe_command, MPX);
-				}
-				gettimeofday(&t1, NULL);
-				free((void *)recording_file_name);
-			}
+		/* check limits first. else, files are immediately closed again, cause diff_ms still > .. */
+		if (unlikely(!mpx_is_limited && mds->mpx_limit_duration > 0 && diff_ms_mpx > 1000.0 * mds->mpx_limit_duration)) {
+			mpx_is_limited = 1;
+			close_all_channel_outputs(mds, 1, 0);	/* close mpx files or pipes */
+			if (verbosity)
+				fprintf(stderr, "closing mpx stream, cause of limit\n");
+		}
+		if (unlikely(!audio_is_limited && mds->audio_limit_duration > 0 && diff_ms_audio > 1000.0 * mds->audio_limit_duration)) {
+			audio_is_limited = 1;
+			close_all_channel_outputs(mds, 0, 1);	/* close audio files or pipes */
+			if (verbosity)
+				fprintf(stderr, "closing audio stream, cause of limit\n");
 		}
 
+		if (unlikely(init_open || (mds->mpx_split_duration > 0 && diff_ms_mpx > 1000.0 * mds->mpx_split_duration))) {
+			time_t current_time = time(NULL);
+			struct tm *tm = localtime(&current_time);
+			const int milli = (int)(t2.tv_usec/1000);
+			close_all_channel_outputs(mds, 1, 0);	/* close mpx files or pipes */
+			open_all_mpx_channel_outputs(mds, mpx_rate, tm, milli);
+			mpx_is_limited = 0;
+			t1_mpx = t2;
+		}
+		if (unlikely(init_open || (mds->audio_split_duration > 0 && diff_ms_audio > 1000.0 * mds->audio_split_duration))) {
+			time_t current_time = time(NULL);
+			struct tm *tm = localtime(&current_time);
+			const int milli = (int)(t2.tv_usec/1000);
+			close_all_channel_outputs(mds, 0, 1);	/* close audio files or pipes */
+			open_all_audio_channel_outputs(mds, audio_rate, tm, milli);
+			audio_is_limited = 0;
+			t1_audio = t2;
+		}
+		init_open = 0;
+
 		read_idx = mds->buffer_read_idx;
-		mds->buffer_read_idx = (mds->buffer_read_idx + 1) % NUM_CIRCULAR_BUFFERS;
+		mds->buffer_read_idx = (mds->buffer_read_idx + 1) % mds->num_circular_buffers;
 		buffer = &mds->buffers[read_idx];
 		pthread_rwlock_wrlock(&buffer->rw);	/* lock before reading into demod_thread_state.lowpassed */
 
@@ -482,8 +577,7 @@ static void *multi_demod_thread_fn(void *arg)
 		pthread_rwlock_unlock(&buffer->rw);
 
 		for (ch = 0; ch < mds->channel_count; ++ch) {
-			struct demod_state *d = &mds->demod_states[ch];
-			full_demod(&mds->demod_states[ch], mds->mpx_fptr[ch]->f, mds->fptr[ch]->f);
+			full_demod(&mds->demod_states[ch], mds->fmpx[ch], mds->faudio[ch]);
 		}
 
 		if (do_exit)
@@ -501,7 +595,7 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 	uint32_t capture_rate;
 	struct dongle_state *d = &dongle;
 	struct demod_thread_state *dt = &dm_thr;
-	struct demod_state *config = dt->config_demod_state;
+	struct demod_state *config = &dt->demod_states[0];
 	config->downsample = (MinCaptureRate / config->rate_in) + 1;
 	if (config->downsample_passes) {
 		config->downsample_passes = (int)log2(config->downsample) + 1;
@@ -540,7 +634,7 @@ static int controller_fn(struct demod_thread_state *s)
 {
 	int i, r;
 	int32_t dongle_rate, nyq_min, nyq_max;
-	struct demod_state *demod_config = dm_thr.config_demod_state;
+	struct demod_state *demod_config = &dm_thr.demod_states[0];
 
 	r = optimal_settings(s->center_freq, demod_config->rate_in);
 	if (r) {
@@ -558,15 +652,14 @@ static int controller_fn(struct demod_thread_state *s)
 	dongle_rate = dongle.rate;
 	nyq_max = dongle_rate /2;
 	for (i = 0; i < s->channel_count; ++i) {
-		fprintf(stdout, " freq %lu will be recording soon \n", dongle.freq+s->freqs[i]);
+		fprintf(stderr, " freq %lu will be recording soon \n", dongle.freq+s->freqs[i]);
 		if (s->freqs[i] <= -nyq_max || s->freqs[i] >= nyq_max) {
 			fprintf(stderr, "Warning: frequency for channel %d (=%d Hz) is out of Nyquist band!\n", i, (int)s->freqs[i]);
 			fprintf(stderr, "  nyquist band is from %d .. %d Hz\n", -nyq_max, nyq_max);
 		}
 		mixer_init(&dm_thr.mixers[i], s->freqs[i], dongle.rate);
-		if (i)
-			/* distribute demod setting from 1st to all */
-			demod_copy_fields(&dm_thr.demod_states[i], demod_config);
+		/* distribute demod setting from 1st (=config) to all */
+		demod_copy_fields(&dm_thr.demod_states[i], demod_config);
 		/* allocate memory per channel */
 		demod_init(&dm_thr.demod_states[i], 0, 1);
 	}
@@ -605,8 +698,6 @@ void frequency_range(struct demod_thread_state *s, char *arg)
 	}
 	stop[-1] = ':';
 	step[-1] = ':';
-
-	//s->channel_count = s->channel_count;
 }
 
 void dongle_init(struct dongle_state *s)
@@ -627,33 +718,44 @@ void dongle_init(struct dongle_state *s)
 
 void init_demods()
 {
-	struct demod_state *conf = dm_thr.config_demod_state;
+	struct demod_state *conf = &dm_thr.demod_states[0];
 	for(int i=0; i<dm_thr.channel_count; i++) {
 		struct demod_state *s = &dm_thr.demod_states[i];
 		demod_copy_fields(s, conf);
-		demod_copy_config(s, conf);
 		demod_init(s, 0, 1);
 	}
 }
 
 void demod_thread_state_init(struct demod_thread_state *s)
 {
-	
-	s->config_demod_state = (struct demod_state *)malloc(sizeof(struct demod_state));
-	demod_init(s->config_demod_state, 1, 0); /* just for config arranging */
+	for (int ch = 0; ch < MAX_NUM_CHANNELS; ++ch) {
+		demod_init(&s->demod_states[ch], 1, 0);
+		s->faudio[ch] = NULL;
+		s->fmpx[ch] = NULL;
+	}
 
+	s->num_circular_buffers = 4;
 	s->buffer_write_idx = 0;
 	s->buffer_read_idx = 0;
-	s->split_duration = -1;
+	s->mpx_split_duration = -1;
+	s->audio_split_duration = -1;
+	s->mpx_limit_duration = 0;
+	s->audio_limit_duration = 0;
 	s->channel_count = -1;
 
-	for (int i = 0; i < NUM_CIRCULAR_BUFFERS; i++)
-	{
+	for (int i = 0; i < MAX_CIRCULAR_BUFFERS; i++) {
 		pthread_rwlock_init(&s->buffers[i].rw, NULL);
 		s->buffers[i].is_free = 1;
+		s->buffers[i].lowpassed = NULL;
 	}
-	s->mpx_pipe_command = NULL;
-	s->audio_pipe_command = NULL;
+
+	s->mpx_pipe_pattern = DEFAULT_MPX_PIPE_PATTERN;
+	s->mpx_file_pattern = DEFAULT_MPX_FILE_PATTERN;
+	s->audio_pipe_pattern = DEFAULT_AUDIO_PIPE_PATTERN;
+	s->audio_file_pattern = DEFAULT_AUDIO_FILE_PATTERN;
+
+	s->audio_write_type = DEFAULT_AUDIO_WRITE_TYPE;
+	s->mpx_write_type = DEFAULT_MPX_WRITE_TYPE;
 
 	s->center_freq = 100000000;
 
@@ -661,52 +763,24 @@ void demod_thread_state_init(struct demod_thread_state *s)
 	pthread_mutex_init(&s->ready_m, NULL);
 }
 
+void demod_thread_init_ring_buffers(struct demod_thread_state *s, const int buflen)
+{
+	for (int i = 0; i < s->num_circular_buffers; i++) {
+		s->buffers[i].lowpassed = (int16_t*)malloc( sizeof(int16_t) * buflen );
+	}
+}
+
 void multi_demod_init_fptrs(struct demod_thread_state *s)
 {
-	char *file_name;
-	file_name = (char *) malloc(50 * sizeof(char));
-	memset(file_name, 0, 50);
-
-	if (dm_thr.audio_pipe_command && dm_thr.audio_write_file)
-	{
-		fprintf(stderr, "cannot write audio signal to pipe and file at the same time! Exiting..\n");
-		exit(0);
-	} else if(!dm_thr.audio_pipe_command && !dm_thr.audio_write_file){
-		fprintf(stderr, "either write audio signal pipe or file must! Exiting..\n");
+	if (s->audio_write_type == 2 && !s->audio_pipe_pattern) {
+		fprintf(stderr, "Error: command pattern for audio is missing! Exiting..\n");
 		exit(0);
 	}
 
-	if (dm_thr.mpx_pipe_command && dm_thr.mpx_write_file)
-	{
-		fprintf(stderr, "cannot write mpx signal to pipe and file at the same time! Exiting..");
+	if (s->mpx_write_type == 2 && !s->mpx_pipe_pattern) {
+		fprintf(stderr, "Error: command pattern for mpx is missing! Exiting..\n");
 		exit(0);
 	}
-
-	for(int i=0; i<s->channel_count; i++) {
-		int freq = (s->center_freq + s->freqs[i])/10000;
-		s->fptr[i] = (I_FILE *) malloc(sizeof(struct I_FILE));
-		s->mpx_fptr[i] = (I_FILE *) malloc(sizeof(struct I_FILE));
-	    sprintf(file_name, "%04u", freq);
-
-		if (dm_thr.audio_pipe_command) {
-			s->fptr[i] = open_pipe(generate_file_name(file_name, MP3), i, freq, s->audio_pipe_command, AUDIO);
-		} else if (dm_thr.audio_write_file){
-			s->fptr[i]->f = fopen(generate_file_name(file_name, RAW), "wb");
-			s->fptr[i]->name = strdup(file_name);
-		}
-
-		memset(file_name, 0, 50);
-
-		if (dm_thr.mpx_pipe_command) {
-			sprintf(file_name, "rds-%04u", freq);
-			s->mpx_fptr[i] = open_pipe(generate_file_name(file_name, TXT), i, freq, s->mpx_pipe_command, MPX);
-		} else if (dm_thr.mpx_write_file) {
-			sprintf(file_name, "%04u-mpx", freq);
-			s->mpx_fptr[i]->f = fopen(generate_file_name(file_name, RAW), "wb");
-			s->mpx_fptr[i]->name = strdup(file_name);
-		}
-	}
-	free(file_name);
 }
 
 void demod_thread_cleanup(struct demod_thread_state *s)
@@ -714,28 +788,18 @@ void demod_thread_cleanup(struct demod_thread_state *s)
 	pthread_rwlock_destroy(&s->rw);
 	pthread_cond_destroy(&s->ready);
 	pthread_mutex_destroy(&s->ready_m);
-	demod_cleanup(s->config_demod_state);
+
+	close_all_channel_outputs(s, 1, 1);
 
 	for(int i=0; i<s->channel_count; i++) {
 		demod_cleanup(&s->demod_states[i]);
-		if (dm_thr.audio_pipe_command) {
-			pclose(s->fptr[i]->f);
-		} else {
-			fflush(s->fptr[i]->f);
-			fclose(s->fptr[i]->f);
-		}
+	}
 
-		if (dm_thr.mpx_pipe_command) {
-			pclose(s->mpx_fptr[i]->f);
-		} else {
-			fflush(s->mpx_fptr[i]->f);
-			fclose(s->mpx_fptr[i]->f);
+	for (int k=0; k < MAX_CIRCULAR_BUFFERS; ++k) {
+		if (s->buffers[k].lowpassed) {
+			free(s->buffers[k].lowpassed);
+			s->buffers[k].lowpassed = NULL;
 		}
-
-		if(s->fptr[i])
-			free(s->fptr[i]);
-		if(s->mpx_fptr[i])
-			free(s->mpx_fptr[i]);
 	}
 }
 
@@ -772,9 +836,9 @@ int main(int argc, char **argv)
 	int rtlagc = 0;
 	dongle_init(&dongle);
 	demod_thread_state_init(&dm_thr);
-	demod = dm_thr.config_demod_state;
+	demod = &dm_thr.demod_states[0];
 
-	while ((opt = getopt(argc, argv, "d:f:g:m:s:a:x:t:r:p:R:E:O:F:A:M:hTbnq:c:w:W:D:Hv")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:g:m:s:a:x:t:l:r:p:R:E:O:F:A:M:hTq:c:w:W:n:D:v")) != -1) {
 		switch (opt) {
 		case 'd':
 			dongle.dev_index = verbose_device_search(optarg);
@@ -813,7 +877,24 @@ int main(int argc, char **argv)
 			demod->rate_out2 = (int)atofs(optarg);
 			break;
 		case 't':
-			dm_thr.split_duration = atoi(optarg);
+			if (!strncmp(optarg, "x:", 2)) {
+				dm_thr.mpx_split_duration = atoi(&optarg[2]);
+			} else if (!strncmp(optarg, "a:", 2)) {
+				dm_thr.audio_split_duration = atoi(&optarg[2]);
+			} else {
+				dm_thr.audio_split_duration = atoi(optarg);
+				dm_thr.mpx_split_duration = dm_thr.audio_split_duration;
+			}
+			break;
+		case 'l':
+			if (!strncmp(optarg, "x:", 2)) {
+				dm_thr.mpx_limit_duration = atoi(&optarg[2]);
+			} else if (!strncmp(optarg, "a:", 2)) {
+				dm_thr.audio_limit_duration = atoi(&optarg[2]);
+			} else {
+				dm_thr.audio_limit_duration = atoi(optarg);
+				dm_thr.mpx_limit_duration = dm_thr.audio_limit_duration;
+			}
 			break;
 		case 'p':
 			dongle.ppm_error = atoi(optarg);
@@ -846,16 +927,44 @@ int main(int argc, char **argv)
 			dongle.rdc_block_const = atoi(optarg);
 			break;
 		case 'a':
-			dm_thr.audio_pipe_command = optarg;
+			if (!strcmp(optarg, "n") || !strcmp(optarg, "N") || !strcmp(optarg, "%")) {
+				dm_thr.audio_write_type = 0;
+			} else if (!strncmp(optarg, "p:", 2)) {
+				if (optarg[2])
+					dm_thr.audio_pipe_pattern = &optarg[2];
+				else
+					fprintf(stderr, "activating audio pipe output - keeping previous pattern: %s\n", dm_thr.audio_pipe_pattern);
+				dm_thr.audio_write_type = 2;
+			} else if (!strncmp(optarg, "f:", 2)) {
+				if (optarg[2])
+					dm_thr.audio_file_pattern = &optarg[2];
+				else
+					fprintf(stderr, "activating audio file output - keeping previous pattern: %s\n", dm_thr.audio_file_pattern);
+				dm_thr.audio_write_type = 1;
+			} else {
+				dm_thr.audio_file_pattern = optarg;
+				dm_thr.audio_write_type = 1;
+			}
 			break;
 		case 'x':
-			dm_thr.mpx_pipe_command = optarg;
-			break;
-		case 'b':
-			dm_thr.audio_write_file = 1;
-			break;
-		case 'n':
-			dm_thr.mpx_write_file = 1;
+			if (!strcmp(optarg, "n") || !strcmp(optarg, "N") || !strcmp(optarg, "%")) {
+				dm_thr.mpx_write_type = 0;
+			} else if (!strncmp(optarg, "p:", 2)) {
+				if (optarg[2])
+					dm_thr.mpx_pipe_pattern = &optarg[2];
+				else
+					fprintf(stderr, "activating mpx pipe output - keeping previous pattern: %s\n", dm_thr.mpx_pipe_pattern);
+				dm_thr.mpx_write_type = 2;
+			} else if (!strncmp(optarg, "f:", 2)) {
+				if (optarg[2])
+					dm_thr.mpx_file_pattern = &optarg[2];
+				else
+					fprintf(stderr, "activating mpx file output - keeping previous pattern: %s\n", dm_thr.mpx_file_pattern);
+				dm_thr.mpx_write_type = 1;
+			} else {
+				dm_thr.audio_file_pattern = optarg;
+				dm_thr.mpx_write_type = 1;
+			}
 			break;
 		case 'F':
 			demod->downsample_passes = 1;  /* truthy placeholder */
@@ -891,6 +1000,14 @@ int main(int argc, char **argv)
 				demod->custom_atan = 1;
 				demod->deemph = 1;
 			}
+			if (strcmp("mwfm", optarg) == 0) {
+				demod->mode_demod = &fm_demod;
+				demod->rate_in = 171000;
+				demod->rate_out = 171000;
+				demod->rate_out2 = 21375;	/* = 171000 / 8 */
+				/* atan_lut_init();
+				demod->custom_atan = 2; */
+			}
 			break;
 		case 'T':
 			enable_biastee = 1;
@@ -923,6 +1040,17 @@ int main(int argc, char **argv)
 				dongle.buf_len = MAXIMUM_BUF_LENGTH;
 			}
 			break;
+		case 'n':
+			dm_thr.num_circular_buffers = atoi(optarg);
+			if (dm_thr.num_circular_buffers < 2) {
+				fprintf(stderr, "Warning: lower limit for option -n is 2\n");
+				dm_thr.num_circular_buffers = 2;    /* minimum 2 buffers */
+			}
+			if (dm_thr.num_circular_buffers > MAX_CIRCULAR_BUFFERS) {
+				fprintf(stderr, "Warning: limit circular buffers from option -n to %d\n", MAX_CIRCULAR_BUFFERS);
+				dm_thr.num_circular_buffers = MAX_CIRCULAR_BUFFERS;
+			}
+			break;
 		case 'h':
 		case '?':
 		default:
@@ -938,6 +1066,8 @@ int main(int argc, char **argv)
 			fprintf(stderr, "using wbfm deemphasis filter with time constant %d us\n", timeConstant );
 	}
 
+	/* demod_thread_init_ring_buffers(&dm_thr, MAXIMUM_BUF_LENGTH); */
+	demod_thread_init_ring_buffers(&dm_thr, dongle.buf_len);
 	multi_demod_init_fptrs(&dm_thr);
 	init_demods();
 
@@ -1025,11 +1155,8 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	pthread_create(&dm_thr.thread, NULL, multi_demod_thread_fn, (void *)(&dm_thr));
-	pthread_create(&dongle.thread, NULL, dongle_thread_fn, (void *)(&dongle));
 
-	while (!do_exit) {
-		usleep(100000);
-	}
+	rtlsdr_read_async(dongle.dev, rtlsdr_callback, &dongle, 0, dongle.buf_len);
 
 	if (do_exit) {
 		fprintf(stderr, "\nUser cancel, exiting...\n");}
@@ -1037,7 +1164,6 @@ int main(int argc, char **argv)
 		fprintf(stderr, "\nLibrary error %d, exiting...\n", r);}
 
 	rtlsdr_cancel_async(dongle.dev);
-	pthread_join(dongle.thread, NULL);
 	safe_cond_signal(&dm_thr.ready, &dm_thr.ready_m);
 	pthread_join(dm_thr.thread, NULL);
 
