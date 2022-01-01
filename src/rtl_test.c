@@ -515,8 +515,6 @@ int main(int argc, char **argv)
 	uint32_t out_block_size = DEFAULT_BUF_LENGTH;
 	uint32_t tuner_bench_beg_freq = 0;
 	uint32_t tuner_bench_end_freq = 0;
-	int count;
-	int gains[100];
 
 	while ((opt = getopt(argc, argv, "d:s:b:O:tf:e:p::Sh")) != -1) {
 		switch (opt) {
@@ -594,13 +592,9 @@ int main(int argc, char **argv)
 #else
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #endif
-	count = rtlsdr_get_tuner_gains(dev, NULL);
-	fprintf(stderr, "Supported gain values (%d): ", count);
 
-	count = rtlsdr_get_tuner_gains(dev, gains);
-	for (i = 0; i < count; i++)
-		fprintf(stderr, "%.1f ", gains[i] / 10.0);
-	fprintf(stderr, "\n");
+	verbose_list_gains(dev, 0);
+	verbose_list_bandwidths(dev);
 
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, samp_rate);

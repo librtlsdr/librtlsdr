@@ -991,12 +991,7 @@ int main(int argc, char **argv)
 		if (r >= 0)
 			dongle_info.tuner_gain_count = htonl(r);
 		if (verbosity)
-		{
-			fprintf(stderr, "Supported gain values (%d): ", r);
-			for (i = 0; i < r; i++)
-				fprintf(stderr, "%.1f ", gains[i] / 10.0);
-			fprintf(stderr, "\n");
-		}
+			verbose_list_gains(dev, 0);
 
 		r = sendto(s, (const char *)&dongle_info, sizeof(dongle_info), 0, (struct sockaddr *)&remote, sizeof(remote));
 		if (sizeof(dongle_info) != r)

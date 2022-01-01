@@ -1400,19 +1400,7 @@ int main(int argc, char **argv)
 	verbose_set_bandwidth(dongle.dev, dongle.bandwidth);
 
 	if (verbosity && dongle.bandwidth)
-	{
-		int r;
-		uint32_t in_bw, out_bw, last_bw = 0;
-		fprintf(stderr, "Supported bandwidth values in kHz:\n");
-		for ( in_bw = 1; in_bw < 3200; ++in_bw )
-		{
-			r = rtlsdr_set_and_get_tuner_bandwidth(dongle.dev, in_bw*1000, &out_bw, 0 /* =apply_bw */);
-			if ( r == 0 && out_bw != 0 && ( out_bw != last_bw || in_bw == 1 ) )
-				fprintf(stderr, "%s%.1f", (in_bw==1 ? "" : ", "), out_bw/1000.0 );
-			last_bw = out_bw;
-		}
-		fprintf(stderr,"\n");
-	}
+		verbose_list_bandwidths(dongle.dev);
 
 	if (rtlOpts) {
 		rtlsdr_set_opt_string(dongle.dev, rtlOpts, verbosity);

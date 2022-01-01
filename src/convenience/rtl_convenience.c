@@ -68,6 +68,38 @@ int nearest_gain(rtlsdr_dev_t *dev, int target_gain)
 	return nearest;
 }
 
+void verbose_list_gains(rtlsdr_dev_t *dev, int tenth_db)
+{
+	int gains[128];
+	int count = rtlsdr_get_tuner_gains(dev, NULL);
+
+	fprintf(stderr, "Supported gain values %s(%d): ", (tenth_db ? "" : "in dB "), count);
+
+	count = rtlsdr_get_tuner_gains(dev, gains);
+	for (int i = 0; i < count; i++) {
+		if (tenth_db)
+			fprintf(stderr, "%d ", gains[i]);
+		else
+			fprintf(stderr, "%.1f ", gains[i] / 10.0);
+	}
+	fprintf(stderr, "\n");
+}
+
+void verbose_list_bandwidths(rtlsdr_dev_t *dev)
+{
+	int r;
+	uint32_t in_bw, out_bw, last_bw = 0;
+	fprintf(stderr, "Supported bandwidth values in kHz: ");
+	for ( in_bw = 1; in_bw < 3200; ++in_bw )
+	{
+		r = rtlsdr_set_and_get_tuner_bandwidth(dev, in_bw*1000, &out_bw, 0 /* =apply_bw */);
+		if ( r == 0 && out_bw != 0 && ( out_bw != last_bw || in_bw == 1 ) )
+			fprintf(stderr, "%s%u", (in_bw==1 ? "" : " "), (unsigned)(out_bw/1000) );
+		last_bw = out_bw;
+	}
+	fprintf(stderr,"\n");
+}
+
 int verbose_set_frequency(rtlsdr_dev_t *dev, uint64_t frequency)
 {
 	int r;
