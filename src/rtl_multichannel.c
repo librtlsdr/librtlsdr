@@ -98,6 +98,15 @@ struct demod_input_buffer
 	pthread_rwlock_t	rw;
 };
 
+struct p_closing_thread
+{	
+	FILE *fptr;
+	atomic_int has_file;
+	pthread_t closing_thread;
+	pthread_cond_t ready;
+	pthread_mutex_t ready_m;
+};
+
 struct demod_thread_state
 {
 	struct mixer_state mixers[MAX_NUM_CHANNELS];
@@ -118,6 +127,8 @@ struct demod_thread_state
 	const char *mpx_file_pattern;
 	int audio_write_type;	/* 0: nothing, 1: file, 2: pipe */
 	int mpx_write_type;
+	struct p_closing_thread audio_p_closing_thread[MAX_NUM_CHANNELS]; /* specific for pipe closing */
+	struct p_closing_thread mpx_p_closing_thread[MAX_NUM_CHANNELS]; /* specific for pipe closing */
 
 	int mpx_split_duration;		/* split file or pipe in seconds */
 	int audio_split_duration;
@@ -350,26 +361,63 @@ static FILE * create_iq_file(const char* filename, const char * st) {
 	return f;
 }
 
-void close_all_channel_outputs(struct demod_thread_state *s, int close_mpx, int close_audio)
+static void *close_pipe_fn(void* arg) {
+	struct p_closing_thread *ct = arg;
+	while (!do_exit) {
+		safe_cond_wait(&ct->ready, &ct->ready_m);
+		if(!ct->has_file){
+			fprintf(stderr, "Error, has file\n");
+			ct->has_file = 0;
+			continue;
+		}
+		if (ct->fptr){
+			fflush(ct->fptr);
+			pclose(ct->fptr);
+		}
+		ct->has_file = 0;
+	}
+	return 0;
+}
+
+void close_all_channel_outputs(struct demod_thread_state *s, int close_mpx, int close_audio, int use_thread)
 {
 	for(int ch = 0; ch < s->channel_count; ++ch) {
 		FILE *f = s->faudio[ch];
 		if (f && close_audio) {
-			fflush(f);
-			if (s->audio_write_type == 2)
-				pclose(f);
-			else if (s->audio_write_type == 1)
+			if (s->audio_write_type == 2) {
+				if(use_thread == 1) {
+					if(s->audio_p_closing_thread[ch].has_file == 0) {
+						fprintf(stderr, "error, pclose has not finished\n");
+					}
+					s->audio_p_closing_thread[ch].fptr = f;
+					s->audio_p_closing_thread[ch].has_file = 1;
+					safe_cond_signal(&s->audio_p_closing_thread[ch].ready, &s->audio_p_closing_thread[ch].ready_m);
+				} else {
+					fflush(f);
+					pclose(f);	
+				}
+			} else if (s->audio_write_type == 1) {
+				fflush(f);
 				fclose(f);
+			}
 			s->faudio[ch] = NULL;
 		}
 
 		f = s->fmpx[ch];
 		if (f && close_mpx) {
-			fflush(f);
 			if (s->mpx_write_type == 2)
-				pclose(f);
+				if(use_thread == 1) {
+					s->mpx_p_closing_thread[ch].fptr = f;
+					safe_cond_signal(&s->mpx_p_closing_thread[ch].ready, &s->mpx_p_closing_thread[ch].ready_m);
+				} else {
+					fflush(f);
+					pclose(f);	
+				}
 			else if (s->mpx_write_type == 1)
-				fclose(f);
+			{
+				fflush(f);
+				fclose(f);			
+			}
 			s->fmpx[ch] = NULL;
 		}
 	}
@@ -478,7 +526,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 	pthread_rwlock_wrlock(&buffer->rw);	/* lock before writing into demod_thread_state.lowpassed */
 	if (!buffer->is_free) {
 		do_exit = 1;
-		fprintf(stderr, "Overflow of circular input buffers, exiting!\n");
+		fprintf(stderr, "* * * Overflow of circular input buffers, exiting! * * *\n");
 		rtlsdr_cancel_async(dongle.dev);
 		pthread_rwlock_unlock(&buffer->rw);
 		return;
@@ -531,13 +579,13 @@ static void *multi_demod_thread_fn(void *arg)
 		/* check limits first. else, files are immediately closed again, cause diff_ms still > .. */
 		if (unlikely(!mpx_is_limited && mds->mpx_limit_duration > 0 && diff_ms_mpx > 1000.0 * mds->mpx_limit_duration)) {
 			mpx_is_limited = 1;
-			close_all_channel_outputs(mds, 1, 0);	/* close mpx files or pipes */
+			close_all_channel_outputs(mds, 1, 0, 1);	/* close mpx files or pipes */
 			if (verbosity)
 				fprintf(stderr, "closing mpx stream, cause of limit\n");
 		}
 		if (unlikely(!audio_is_limited && mds->audio_limit_duration > 0 && diff_ms_audio > 1000.0 * mds->audio_limit_duration)) {
 			audio_is_limited = 1;
-			close_all_channel_outputs(mds, 0, 1);	/* close audio files or pipes */
+			close_all_channel_outputs(mds, 0, 1, 1);	/* close audio files or pipes */
 			if (verbosity)
 				fprintf(stderr, "closing audio stream, cause of limit\n");
 		}
@@ -546,7 +594,7 @@ static void *multi_demod_thread_fn(void *arg)
 			time_t current_time = time(NULL);
 			struct tm *tm = localtime(&current_time);
 			const int milli = (int)(t2.tv_usec/1000);
-			close_all_channel_outputs(mds, 1, 0);	/* close mpx files or pipes */
+			close_all_channel_outputs(mds, 1, 0, 1);	/* close mpx files or pipes */
 			open_all_mpx_channel_outputs(mds, mpx_rate, tm, milli);
 			mpx_is_limited = 0;
 			t1_mpx = t2;
@@ -555,7 +603,7 @@ static void *multi_demod_thread_fn(void *arg)
 			time_t current_time = time(NULL);
 			struct tm *tm = localtime(&current_time);
 			const int milli = (int)(t2.tv_usec/1000);
-			close_all_channel_outputs(mds, 0, 1);	/* close audio files or pipes */
+			close_all_channel_outputs(mds, 0, 1, 1);	/* close audio files or pipes */
 			open_all_audio_channel_outputs(mds, audio_rate, tm, milli);
 			audio_is_limited = 0;
 			t1_audio = t2;
@@ -789,10 +837,15 @@ void demod_thread_cleanup(struct demod_thread_state *s)
 	pthread_cond_destroy(&s->ready);
 	pthread_mutex_destroy(&s->ready_m);
 
-	close_all_channel_outputs(s, 1, 1);
+	close_all_channel_outputs(s, 1, 1, 0);
 
 	for(int i=0; i<s->channel_count; i++) {
 		demod_cleanup(&s->demod_states[i]);
+
+		pthread_cond_destroy(&s->audio_p_closing_thread[i].ready);
+		pthread_cond_destroy(&s->mpx_p_closing_thread[i].ready);
+		pthread_mutex_destroy(&s->audio_p_closing_thread[i].ready_m);
+		pthread_mutex_destroy(&s->mpx_p_closing_thread[i].ready_m);
 	}
 
 	for (int k=0; k < MAX_CIRCULAR_BUFFERS; ++k) {
@@ -1155,6 +1208,19 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	pthread_create(&dm_thr.thread, NULL, multi_demod_thread_fn, (void *)(&dm_thr));
+
+	/* open pipe closing threads if need */
+	for (int ch = 0; ch < dm_thr.channel_count; ++ch) {
+		if (dm_thr.audio_write_type == 2 && dm_thr.audio_split_duration > 0) {
+			dm_thr.audio_p_closing_thread[ch].fptr = NULL;
+			pthread_create(&dm_thr.audio_p_closing_thread[ch].closing_thread, NULL, close_pipe_fn, (&dm_thr.audio_p_closing_thread[ch]));	
+		} 
+		if (dm_thr.mpx_write_type == 2 && dm_thr.mpx_split_duration > 0) {
+			dm_thr.mpx_p_closing_thread[ch].fptr = NULL;
+			pthread_create(&dm_thr.mpx_p_closing_thread[ch].closing_thread, NULL, close_pipe_fn, (&dm_thr.mpx_p_closing_thread[ch]));
+		}
+	}
+	
 
 	rtlsdr_read_async(dongle.dev, rtlsdr_callback, &dongle, 0, dongle.buf_len);
 
