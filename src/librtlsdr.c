@@ -280,6 +280,9 @@ struct rtlsdr_dev {
 	int rc_active;
 	int verbose;
 	int dev_num;
+
+	/* option for user managed buffers */
+	int xfer_buf_keep;
 };
 
 static int rtlsdr_demod_write_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint16_t val, uint8_t len);
@@ -3454,6 +3457,8 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 		rtlsdr_deinit_baseband(dev);
 	}
 
+	rtlsdr_free_async(dev);
+
 	softagc_uninit(dev);
 	pthread_mutex_destroy(&dev->cs_mutex);
 
@@ -3830,7 +3835,7 @@ int rtlsdr_wait_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx)
 	return rtlsdr_read_async(dev, cb, ctx, 0, 0);
 }
 
-static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
+static int _rtlsdr_alloc_async_transfer(rtlsdr_dev_t *dev)
 {
 	unsigned int i;
 
@@ -3845,6 +3850,18 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 			dev->xfer[i] = libusb_alloc_transfer(0);
 	}
 
+	return 0;
+}
+
+static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
+{
+	unsigned int i;
+
+	if (!dev)
+		return -1;
+
+	if (dev->xfer_buf_keep) /* buffers are already setup by the user */
+		return 0;
 	if (dev->xfer_buf)
 		return -2;
 
@@ -3894,7 +3911,7 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 	return 0;
 }
 
-static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
+static int _rtlsdr_free_async_transfer(rtlsdr_dev_t *dev)
 {
 	unsigned int i;
 
@@ -3911,6 +3928,18 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 		free(dev->xfer);
 		dev->xfer = NULL;
 	}
+
+	return 0;
+}
+
+int rtlsdr_free_async(rtlsdr_dev_t *dev)
+{
+	unsigned int i;
+
+	if (!dev)
+		return -1;
+
+	dev->xfer_buf_keep = 0;
 
 	if (dev->xfer_buf) {
 		for (i = 0; i < dev->xfer_buf_num; ++i) {
@@ -3932,6 +3961,32 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 	}
 
 	return 0;
+}
+
+int rtlsdr_init_async(rtlsdr_dev_t *dev,
+				uint32_t buf_num, uint32_t buf_len)
+{
+	if (!dev)
+		return -1;
+
+	rtlsdr_free_async(dev); /* free old buffers, if any exist */
+
+	if (buf_num > 0)
+		dev->xfer_buf_num = buf_num;
+	else
+		dev->xfer_buf_num = DEFAULT_BUF_NUMBER;
+
+	if (buf_len > 0 && buf_len % 512 == 0) /* len must be multiple of 512 */
+		dev->xfer_buf_len = buf_len;
+	else
+		dev->xfer_buf_len = DEFAULT_BUF_LENGTH;
+
+	int r = _rtlsdr_alloc_async_buffers(dev);
+
+	if (r == 0)
+		dev->xfer_buf_keep = 1;
+
+	return r;
 }
 
 int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
@@ -3970,6 +4025,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 	dev->cb = cb;
 	dev->cb_ctx = ctx;
 
+	if (!dev->xfer_buf_keep) { /* only if buffers are not managed by the user */
 	if (buf_num > 0)
 		dev->xfer_buf_num = buf_num;
 	else
@@ -3979,7 +4035,9 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 		dev->xfer_buf_len = buf_len;
 	else
 		dev->xfer_buf_len = DEFAULT_BUF_LENGTH;
+	}
 
+	_rtlsdr_alloc_async_transfer(dev);
 	_rtlsdr_alloc_async_buffers(dev);
 
 	for(i = 0; i < dev->xfer_buf_num; ++i) {
@@ -4051,7 +4109,9 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 		}
 	}
 
-	_rtlsdr_free_async_buffers(dev);
+	_rtlsdr_free_async_transfer(dev);
+	if (!dev->xfer_buf_keep)
+		rtlsdr_free_async(dev);
 
 	dev->async_status = next_status;
 
