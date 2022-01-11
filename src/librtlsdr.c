@@ -3454,6 +3454,8 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 		rtlsdr_deinit_baseband(dev);
 	}
 
+	rtlsdr_cleanup_async(dev);
+
 	softagc_uninit(dev);
 	pthread_mutex_destroy(&dev->cs_mutex);
 
@@ -3830,7 +3832,7 @@ int rtlsdr_wait_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx)
 	return rtlsdr_read_async(dev, cb, ctx, 0, 0);
 }
 
-static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
+static int _rtlsdr_alloc_async_transfer(rtlsdr_dev_t *dev)
 {
 	unsigned int i;
 
@@ -3845,8 +3847,34 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 			dev->xfer[i] = libusb_alloc_transfer(0);
 	}
 
+	return 0;
+}
+
+static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev,
+				uint32_t buf_num, uint32_t buf_len)
+{
+	unsigned int i;
+
+	if (!dev)
+		return -1;
+
+	if (buf_num == 0)
+		buf_num = DEFAULT_BUF_NUMBER;
+
+	if (buf_len == 0 || buf_len % 512 != 0) /* len must be multiple of 512 */
+		buf_len = DEFAULT_BUF_LENGTH;
+
+	if (dev->xfer_buf_num == buf_num && dev->xfer_buf_len == buf_len && dev->xfer_buf) {
+		return 0; /* suitable buffers already exist */
+	}
+
+	rtlsdr_cleanup_async(dev); /* free old buffers if any exist */
+
 	if (dev->xfer_buf)
 		return -2;
+
+	dev->xfer_buf_num = buf_num;
+	dev->xfer_buf_len = buf_len;
 
 	dev->xfer_buf = malloc(dev->xfer_buf_num * sizeof(unsigned char *));
 	memset(dev->xfer_buf, 0, dev->xfer_buf_num * sizeof(unsigned char *));
@@ -3894,7 +3922,7 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 	return 0;
 }
 
-static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
+static int _rtlsdr_free_async_transfer(rtlsdr_dev_t *dev)
 {
 	unsigned int i;
 
@@ -3911,6 +3939,16 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 		free(dev->xfer);
 		dev->xfer = NULL;
 	}
+
+	return 0;
+}
+
+int rtlsdr_cleanup_async(rtlsdr_dev_t *dev)
+{
+	unsigned int i;
+
+	if (!dev)
+		return -1;
 
 	if (dev->xfer_buf) {
 		for (i = 0; i < dev->xfer_buf_num; ++i) {
@@ -3970,17 +4008,8 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 	dev->cb = cb;
 	dev->cb_ctx = ctx;
 
-	if (buf_num > 0)
-		dev->xfer_buf_num = buf_num;
-	else
-		dev->xfer_buf_num = DEFAULT_BUF_NUMBER;
-
-	if (buf_len > 0 && buf_len % 512 == 0) /* len must be multiple of 512 */
-		dev->xfer_buf_len = buf_len;
-	else
-		dev->xfer_buf_len = DEFAULT_BUF_LENGTH;
-
-	_rtlsdr_alloc_async_buffers(dev);
+	_rtlsdr_alloc_async_buffers(dev, buf_num, buf_len);
+	_rtlsdr_alloc_async_transfer(dev);
 
 	for(i = 0; i < dev->xfer_buf_num; ++i) {
 		libusb_fill_bulk_transfer(dev->xfer[i],
@@ -4051,7 +4080,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 		}
 	}
 
-	_rtlsdr_free_async_buffers(dev);
+	_rtlsdr_free_async_transfer(dev);
 
 	dev->async_status = next_status;
 
