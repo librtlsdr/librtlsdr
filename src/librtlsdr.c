@@ -270,6 +270,8 @@ struct rtlsdr_dev {
 	uint32_t gpio_state_known; /* bitmask over pins 0 .. 7 */
 	uint32_t gpio_state; /* bitmask over pins 0 .. 7: = 0 == write, 1 == read */
 
+	int standby_after_close;
+
 	int called_set_opt;
 
 	/* status */
@@ -3141,6 +3143,8 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	dev->gpio_state = 0;
 	dev->called_set_opt = 0;
 
+	dev->standby_after_close = 1;
+
 	dev->r82xx_c.harmonic = 0;
 
 	/* fprintf(stderr, "\n*********************************\ninit/overwrite tuner VCO settings\n"); */
@@ -4337,6 +4341,15 @@ int rtlsdr_set_bias_tee(rtlsdr_dev_t *dev, int on)
 	return rtlsdr_set_bias_tee_gpio(dev, dev->biast_gpio_pin_no, on);
 }
 
+int rtlsdr_standby_after_close(rtlsdr_dev_t *dev, int on)
+{
+	if (!dev)
+		return -1;
+
+	dev->standby_after_close = on;
+	return 0;
+}
+
 int rtlsdr_set_harmonic_rx(rtlsdr_dev_t *dev, int harmonic)
 {
 	if (!dev)
@@ -4395,6 +4408,7 @@ const char * rtlsdr_get_opt_help(int longInfo)
 		"\t\tport=<udp_port>       1 or tcp port number activates UDP server. default: 0.\n"
 		"\t\t                        default port number: 32323\n"
 #endif
+		"\t\tstandby=<on>          1 activates standby after close, 0 deactivates to keep heated-up\n"
 		;
 	else
 		return
@@ -4406,11 +4420,11 @@ const char * rtlsdr_get_opt_help(int longInfo)
 #endif
 #if ENABLE_VCO_OPTIONS
 		"\t\tds=<direct_sampling>:dm=<ds_mode_thresh>:vcocmin=<c>:vcocmax=<c>:vcoalgo=<a>\n"
-		"\t\tT=<bias_tee>\n"
+		"\t\tT=<bias_tee>"
 #else
-		"\t\tds=<direct_sampling>:dm=<ds_mode_thresh>:T=<bias_tee>\n"
+		"\t\tds=<direct_sampling>:dm=<ds_mode_thresh>:T=<bias_tee>"
 #endif
-		":standby=<en>\n"
+		"\t\t:standby=<en>\n"
 #ifdef WITH_UDP_SERVER
 		"\t\tport=<udp_port default with 1>\n"
 #endif
@@ -4632,6 +4646,12 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 			dev->udpPortNo = udpPortNo;
 		}
 #endif
+		else if (!strncmp(optPart, "standby=", 8)) {
+			int on = atoi(optPart +8);
+			if (verbose)
+				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed standby %d\n", on);
+			ret = rtlsdr_standby_after_close(dev, on);
+		}
 		else if (*optPart) {
 			if (verbose)
 				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed unknown option '%s'\n", optPart);

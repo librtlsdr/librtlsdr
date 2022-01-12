@@ -608,6 +608,19 @@ RTLSDR_API int rtlsdr_set_bias_tee(rtlsdr_dev_t *dev, int on);
  */
 RTLSDR_API int rtlsdr_set_bias_tee_gpio(rtlsdr_dev_t *dev, int gpio, int on);
 
+/*!
+ * Enable or disable Standby mode after rtlsdr_close().
+ * Note: default is to enable standby mode to save energy.
+ * Disabling standby would keep the dongle warm ..,
+ * what is interesting to preserve the ppm error.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param on  1 for activating Standby mode (=default).
+ *         0 to keep the dongle heated up.
+ * \return -1 if device is not initialized. 0 otherwise.
+ */
+
+RTLSDR_API int rtlsdr_standby_after_close(rtlsdr_dev_t *dev, int on);
 
 /*
  * GPIO 0 .. 7 correspond to RTL2832U's pins as follows:
