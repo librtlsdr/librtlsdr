@@ -280,6 +280,9 @@ struct rtlsdr_dev {
 	int rc_active;
 	int verbose;
 	int dev_num;
+
+	/* async read buffers are user controlled */
+	int xfer_buf_user;
 };
 
 static int rtlsdr_demod_write_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint16_t val, uint8_t len);
@@ -3845,6 +3848,9 @@ static int _rtlsdr_alloc_async_buffers(rtlsdr_dev_t *dev)
 			dev->xfer[i] = libusb_alloc_transfer(0);
 	}
 
+	if (dev->xfer_buf_user)
+		return 0;
+
 	if (dev->xfer_buf)
 		return -2;
 
@@ -3912,6 +3918,9 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 		dev->xfer = NULL;
 	}
 
+	if (dev->xfer_buf_user)
+		return 0;
+
 	if (dev->xfer_buf) {
 		for (i = 0; i < dev->xfer_buf_num; ++i) {
 			if (dev->xfer_buf[i]) {
@@ -3930,6 +3939,27 @@ static int _rtlsdr_free_async_buffers(rtlsdr_dev_t *dev)
 		free(dev->xfer_buf);
 		dev->xfer_buf = NULL;
 	}
+
+	return 0;
+}
+
+int rtlsdr_setup_async(rtlsdr_dev_t *dev,
+				uint32_t buf_num, uint32_t buf_len, unsigned char **bufs)
+{
+	if (buf_num == 0 || buf_len == 0 || bufs == NULL) {
+		/* clear user controlled buffers back to automatic */
+		dev->xfer_buf = NULL;
+		dev->xfer_buf_user = 0;
+		return 0;
+	}
+
+	if (buf_len % 512 != 0) /* len must be multiple of 512 */
+		return -1;
+
+	dev->xfer_buf_num = buf_num;
+	dev->xfer_buf_len = buf_len;
+	dev->xfer_buf = bufs;
+	dev->xfer_buf_user = 1;
 
 	return 0;
 }
@@ -3970,6 +4000,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 	dev->cb = cb;
 	dev->cb_ctx = ctx;
 
+	if (!dev->xfer_buf_user) { /* ignore if buffers are user controlled */
 	if (buf_num > 0)
 		dev->xfer_buf_num = buf_num;
 	else
@@ -3979,6 +4010,7 @@ int rtlsdr_read_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx,
 		dev->xfer_buf_len = buf_len;
 	else
 		dev->xfer_buf_len = DEFAULT_BUF_LENGTH;
+	}
 
 	_rtlsdr_alloc_async_buffers(dev);
 

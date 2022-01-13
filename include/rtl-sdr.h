@@ -536,6 +536,25 @@ typedef void(*rtlsdr_read_async_cb_t)(unsigned char *buf, uint32_t len, void *ct
 RTLSDR_API int rtlsdr_wait_async(rtlsdr_dev_t *dev, rtlsdr_read_async_cb_t cb, void *ctx);
 
 /*!
+ * Setup user controlled buffers for rtlsdr_read_async().
+ * This is optional and can be cleared using emtpy parameters.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param buf_num buffer count, buf_num * buf_len = overall buffer size
+ *		  set to 0 to clear user-controlled buffers
+ * \param buf_len buffer length, must be multiple of 512,
+ *		  should be a multiple of 16384 (URB size),
+ *		  set to 0 to clear user-controlled buffers
+ * \param bufs an array of \p buf_num buffers of \p buf_len length,
+ *		  set to NULL to clear user-controlled buffers
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_setup_async(rtlsdr_dev_t *dev,
+				 uint32_t buf_num,
+				 uint32_t buf_len,
+				 unsigned char **bufs);
+
+/*!
  * Read samples from the device asynchronously. This function will block until
  * it is being canceled using rtlsdr_cancel_async()
  *
