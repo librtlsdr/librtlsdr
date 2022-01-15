@@ -48,7 +48,7 @@ static int do_exit = 0;
 static uint32_t iq_frames_to_read = 0;
 static rtlsdr_dev_t *dev = NULL;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_sdr, an I/Q recorder for RTL2832 based SDR-receivers\n"
@@ -62,16 +62,16 @@ void usage(void)
 		"\t[-s samplerate (default: 2048000 Hz)]\n"
 		"\t[-w tuner_bandwidth (default: automatic)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
+		"%s"
 		"\t[-g gain (default: 0 for auto)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
-		"%s"
 		"\t[-b output_block_size (default: 16 * 16384)]\n"
 		"\t[-n number of samples to read (default: 0, infinite)]\n"
 		"\t[-S force sync output (default: async)]\n"
 		"\t[-N no dithering (default: use dithering)]\n"
 		"\t[-H write wave Header to file (default: off)]\n"
 		"\tfilename (a '-' dumps samples to stdout)\n\n"
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -202,13 +202,13 @@ int main(int argc, char **argv)
 			++verbosity;
 			break;
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
 
 	if (argc <= optind) {
-		usage();
+		usage(verbosity);
 	} else {
 		filename = argv[optind];
 	}

@@ -68,7 +68,7 @@ void dongle_init(struct dongle_state *s)
 
 struct dongle_state dongle;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_ir, display received IR signals\n"
@@ -80,13 +80,14 @@ void usage(void)
 	fprintf(stderr,
 		"Usage:\trtl_ir [-options]\n"
 		"\t[-d device_index (default: 0)]\n"
+		"%s"
 		"\t[-w wait_usec]\tDelay to wait before each iteration (10000)\n"
 		"\t[-c max_count]\tMaximum number of loop iterations (0)\n"
 		"\t[-b]\tDisplay output in binary (default), pulse=1, space=0; each 20 usec\n"
 		"\t[-t]\tDisplay output in text format\n"
 		"\t[-x]\tDisplay output in raw packed bytes, MSB=pulse/space, 7LSB=duration*20 usec\n"
 		"\t[-h]\tHelp\n"
-		);
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -116,9 +117,11 @@ int main(int argc, char **argv) {
 #ifndef _WIN32
 	struct sigaction sigact;
 #endif
+	const char * rtlOpts = NULL;
 	int r, opt;
 	int i, j;
 	int dev_given = 0;
+	int verbosity = 0;
 	unsigned int wait_usec = 100000;
 	int max_count = 0, iteration_count = 0;
 	int output_binary = 0, output_text = 0, output_packed = 0;
@@ -126,11 +129,14 @@ int main(int argc, char **argv) {
 
 	dongle_init(&dongle);
 
-	while ((opt = getopt(argc, argv, "d:c:w:btxh")) != -1) {
+	while ((opt = getopt(argc, argv, "d:O:c:w:btxvh")) != -1) {
 		switch (opt) {
 		case 'd':
 			dongle.dev_index = verbose_device_search(optarg);
 			dev_given = 1;
+			break;
+		case 'O':
+			rtlOpts = optarg;
 			break;
 		case 'w':
 			wait_usec = atoi(optarg);
@@ -147,9 +153,12 @@ int main(int argc, char **argv) {
 		case 'x':
 			output_packed = 1;
 			break;
+		case 'v':
+			++verbosity;
+			break;
 		case 'h':
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
@@ -174,6 +183,10 @@ int main(int argc, char **argv) {
 #else
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #endif
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dongle.dev, rtlOpts, verbosity);
+	}
 
 	verbose_reset_buffer(dongle.dev);
 

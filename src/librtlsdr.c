@@ -3475,11 +3475,17 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 #endif
 		}
 
-		rtlsdr_deinit_baseband(dev);
+		if (dev->standby_after_close)
+			rtlsdr_deinit_baseband(dev);
+		else if (dev->verbose)
+			fprintf(stderr, "*** rtlsdr close(): standby is not activated\n");
 	}
 	else {
-		fprintf(stderr, "Resetting device...\n");
-		libusb_reset_device(dev->devh);
+		if (dev->standby_after_close) {
+			fprintf(stderr, "Resetting device...\n");
+			libusb_reset_device(dev->devh);
+		} else if (dev->verbose)
+			fprintf(stderr, "*** rtlsdr close(): skipping device reset, that standby is not activated\n");
 	}
 
 	softagc_uninit(dev);
@@ -4350,6 +4356,7 @@ const char * rtlsdr_get_opt_help(int longInfo)
 	if ( longInfo )
 		return
 		"\t[-O\tset RTL driver options seperated with ':', e.g. -O 'bc=30000:agc=0' ]\n"
+		"\t\t                      without '-O', the contents of 'LIBRTLSDR_OPT' are used\n"
 		"\t\tf=<freqHz>            set tuner frequency\n"
 		"\t\tbw=<bw_in_kHz>        set tuner bandwidth\n"
 		"\t\tbc=<if_in_Hz>         set band center relative to the complex-base-band '0' frequency\n"
@@ -4398,6 +4405,7 @@ const char * rtlsdr_get_opt_help(int longInfo)
 #else
 		"\t\tds=<direct_sampling>:dm=<ds_mode_thresh>:T=<bias_tee>\n"
 #endif
+		":standby=<en>\n"
 #ifdef WITH_UDP_SERVER
 		"\t\tport=<udp_port default with 1>\n"
 #endif

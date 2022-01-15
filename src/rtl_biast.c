@@ -35,7 +35,7 @@
 
 static rtlsdr_dev_t *dev = NULL;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_biast, a tool for switching the RTL-SDR.com\n"
@@ -50,12 +50,14 @@ void usage(void)
 	fprintf(stderr,
 		"Usage:\trtl_biast [-options]\n"
 		"\t[-d device_index (default: 0)]\n"
+		"%s"
 		"\t[-g GPIO select (default: 0)]\n"
 		"\t[-b set write bias_on (default: 0, in output mode)]\n"
 		"\t[-r read pin (in input mode)]\n"
 		"\t[-w write pin (in output mode)]\n"
 		"\t[-s read all GPIO pins status (0 = write, 1 = read ?? )]\n"
-		"\t[-R read all GPIO pins ?? ]\n");
+		"\t[-R read all GPIO pins ?? ]\n"
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -64,6 +66,7 @@ int main(int argc, char **argv)
 	int i, r, opt, val;
 	int dev_index = 0;
 	int dev_given = 0;
+	int verbosity = 0;
 	int write_pin_given = 0;
 	int read_pin_given = 0;
 	int read_all_given = 0;
@@ -72,7 +75,7 @@ int main(int argc, char **argv)
 	int gpio_pin = 0;
 	int device_count;
 
-	while ((opt = getopt(argc, argv, "d:b:w:g:srRh?")) != -1) {
+	while ((opt = getopt(argc, argv, "d:b:w:g:srRvh?")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = verbose_device_search(optarg);
@@ -95,8 +98,11 @@ int main(int argc, char **argv)
 		case 's':
 			req_status = 1;
 			break;
+		case 'v':
+			++verbosity;
+			break;
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
@@ -172,7 +178,7 @@ int main(int argc, char **argv)
 
 	else
 	{
-		usage();
+		usage(verbosity);
 		r = -1;
 	}
 

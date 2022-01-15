@@ -98,7 +98,7 @@ static int llbuf_num = 500;
 
 static volatile int do_exit = 0;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_tcp, an I/Q spectrum server for RTL2832 based SDR-receivers\n"
@@ -120,14 +120,14 @@ void usage(void)
 		"\t[-n max number of linked list buffers to keep (default: 500)]\n"
 		"\t[-w rtlsdr tuner bandwidth [Hz] (for R820T/2 and E4000 tuners)]\n"
 		"\t[-d device index or serial (default: 0)]\n"
-		"\t[-P ppm_error (default: 0)]\n"
 		"%s"
+		"\t[-P ppm_error (default: 0)]\n"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
 
 		"\t[-D direct_sampling_mode (default: 0, 1 = I, 2 = Q, 3 = I below threshold, 4 = Q below threshold)]\n"
 		"\t[-D direct_sampling_threshold_frequency (default: 0 use tuner specific frequency threshold for 3 and 4)]\n"
 		"\t[-v increase verbosity (default: 0)]\n"
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -851,13 +851,13 @@ int main(int argc, char **argv)
 				ds_threshold = ds_temp;
 			break;
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
 
 	if (argc < optind)
-		usage();
+		usage(verbosity);
 
 	if (verbosity)
 		fprintf(stderr, "verbosity set to %d\n", verbosity);

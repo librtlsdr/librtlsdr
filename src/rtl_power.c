@@ -124,7 +124,7 @@ int comp_fir_size = 0;
 int peak_hold = 0;
 static enum time_modes time_mode = VERBOSE_TIME;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_power, a simple FFT logger for RTL2832 based SDR-receivers\n"
@@ -145,6 +145,7 @@ void usage(void)
 		//"\t[-s avg/iir smoothing (default: avg)]\n"
 		//"\t[-t threads (default: 1)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
+		"%s"
 		"\t[-g tuner_gain (default: automatic)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
@@ -166,7 +167,7 @@ void usage(void)
 		"\t  try with '-c 50%%')\n"
 		"\t[-P enables peak hold (default: off)]\n"
 		"\t[-D enable direct sampling (default: off)]\n"
-		"\t[-O enable offset tuning (default: off)]\n"
+		"\t[-o enable offset tuning (default: off)]\n"
 		"\n"
 		"CSV FFT output columns:\n"
 		"\tdate, time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...\n\n"
@@ -181,7 +182,8 @@ void usage(void)
 		"\trtl_power -f ... -e 1h | gzip > log.csv.gz\n"
 		"\t (collect data for one hour and compress it on the fly)\n\n"
 		"Convert CSV to a waterfall graphic with:\n"
-		"\t http://kmkeen.com/tmp/heatmap.py.txt \n");
+		"\t http://kmkeen.com/tmp/heatmap.py.txt \n"
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -778,10 +780,12 @@ int main(int argc, char **argv)
 	struct sigaction sigact;
 #endif
 	char *filename = NULL;
+	const char * rtlOpts = NULL;
 	int i, length, r, opt, wb_mode = 0;
 	int f_set = 0;
 	int gain = AUTO_GAIN; // tenths of a dB
 	int dev_index = 0;
+	int verbosity = 0;
 	char dev_label[256];
 	int dev_given = 0;
 	int ppm_error = 0;
@@ -804,7 +808,7 @@ int main(int argc, char **argv)
 	double (*window_fn)(int, int) = rectangle;
 	freq_optarg = "";
 
-	while ((opt = getopt(argc, argv, "f:i:s:t:d:g:p:e:w:c:F:1EPOhTD:")) != -1) {
+	while ((opt = getopt(argc, argv, "f:i:s:t:d:g:p:e:w:c:F:1EPo:O:vhTD:")) != -1) {
 		switch (opt) {
 		case 'f': // lower:upper:bin_size
 			freq_optarg = strdup(optarg);
@@ -878,8 +882,11 @@ int main(int argc, char **argv)
 					ds_threshold = ds_temp;
 			}
 			break;
-		case 'O':
+		case 'o':
 			offset_tuning = 1;
+			break;
+		case 'O':
+			rtlOpts = optarg;
 			break;
 		case 'F':
 			boxcar = 0;
@@ -888,9 +895,12 @@ int main(int argc, char **argv)
 		case 'T':
 			enable_biastee = 1;
 			break;
+		case 'v':
+			++verbosity;
+			break;
 		case 'h':
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
@@ -908,7 +918,7 @@ int main(int argc, char **argv)
 	frequency_range(freq_optarg, crop);
 
 	if (tune_count == 0) {
-		usage();}
+		usage(verbosity);}
 
 	if (argc <= optind) {
 		filename = "-";
@@ -983,6 +993,11 @@ int main(int argc, char **argv)
 			fprintf(stderr, "Failed to open %s\n", filename);
 			exit(1);
 		}
+	}
+
+	/* set - especially sideband - before testing tuning range */
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */

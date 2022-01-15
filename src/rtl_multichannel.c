@@ -206,7 +206,7 @@ struct dongle_state
 struct dongle_state dongle;
 struct demod_thread_state dm_thr;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_multichannel, a multichannel demodulator for RTL2832 based SDR-receivers\n"
@@ -264,7 +264,6 @@ void usage(void)
 		"\t	rtlagc: enable rtl2832's digital agc (default: off)\n"
 		"\t	deemp:  enable de-emphasis filter\n"
 		"\t	direct: enable direct sampling (bypasses tuner, uses rtl2832 xtal)\n"
-		"%s"
 		"\t[-q dc_avg_factor for option rdc (default: 9)]\n"
 		/* "\t[-H write wave Header to file (default: off)]\n" */
 		"Experimental options:\n"
@@ -275,7 +274,7 @@ void usage(void)
 		"\n"
 		, AUDIO_OGG_PIPE_PATTERN, DEFAULT_AUDIO_FILE_PATTERN
 		, DEFAULT_MPX_PIPE_PATTERN, DEFAULT_MPX_FILE_PATTERN
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -1506,7 +1505,7 @@ int main(int argc, char **argv)
 		case 'h':
 		case '?':
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}

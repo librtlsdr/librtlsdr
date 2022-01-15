@@ -190,7 +190,7 @@ struct controller_state controller;
 struct cmd_state cmd;
 
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_fm, a simple demodulator for RTL2832 based SDR-receivers\n"
@@ -216,6 +216,7 @@ void usage(void)
 		"\t	raw mode outputs 2x16 bit IQ pairs\n"
 		"\t[-s sample_rate (default: 24k)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
+		"%s"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
 		"\t[-D direct_sampling_mode (default: 0, 1 = I, 2 = Q, 3 = I below threshold, 4 = Q below threshold)]\n"
 		"\t[-D direct_sampling_threshold_frequency (default: 0 use tuner specific frequency threshold for 3 and 4)]\n"
@@ -247,7 +248,6 @@ void usage(void)
 		"\t	bcc:    use tuner bandwidths center as band center (default)\n"
 		"\t	bclo:   use tuner bandwidths low  corner as band center\n"
 		"\t	bchi:   use tuner bandwidths high corner as band center\n"
-		"%s"
 		"\t[-q dc_avg_factor for option rdc (default: 9)]\n"
 		"\t[-n disables demodulation output to stdout/file]\n"
 		"\t[-H write wave Header to file (default: off)]\n"
@@ -275,7 +275,7 @@ void usage(void)
 		"\t		   | aplay -r 24000 -f S16_LE -t raw -c 1\n"
 		"\t  -M wbfm  | play -r 32k ... \n"
 		"\t  -s 22050 | multimon -t raw /dev/stdin\n\n"
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -1321,7 +1321,7 @@ int main(int argc, char **argv)
 		case 'h':
 		case '?':
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
