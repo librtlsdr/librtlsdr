@@ -2,7 +2,12 @@
 
 # requires debian/ubuntu packages: zip gcc-mingw-w64
 
-REPO_DIR=$(pwd)
+CYGPATH=$(which cygpath)
+if [ -z "$CYGPATH" ]; then
+  REPO_DIR="$(pwd)"
+else
+  REPO_DIR=$(cygpath -m "$(pwd)")
+fi
 
 if [ -z "$1" ]; then
   echo "usage: $0 <zip-post> <any other cmake options>"
@@ -42,14 +47,14 @@ if /bin/true; then
   cd ${REPO_DIR} && rm -rf build_${WN}
   echo -e "\n\n********************************************************"
   echo "start build of librtlsdr_${WN}"
-  mkdir ${REPO_DIR}/build_${WN} && cd ${REPO_DIR}/build_${WN} && \
-    cmake -DCMAKE_TOOLCHAIN_FILE=${REPO_DIR}/${TOOLCHAIN} \
+  cmake -DCMAKE_TOOLCHAIN_FILE=${REPO_DIR}/${TOOLCHAIN} \
       -DCMAKE_INSTALL_PREFIX=${REPO_DIR}/rtlsdr-bin-${WN}_${ZIP_POST} \
       -DRTL_STATIC_BUILD=ON "$@"  \
       -DLIBUSB_INCLUDE_DIR=${REPO_DIR}/mingw_libusb_${WN}/include/libusb-1.0 \
       -DLIBUSB_LIBRARIES=${REPO_DIR}/mingw_libusb_${WN}/lib/libusb-1.0.a \
-      ../  && \
-    make && make install
+      -S ${REPO_DIR} -B ${REPO_DIR}/build_${WN} && \
+  cmake --build ${REPO_DIR}/build_${WN} && \
+  cmake --build ${REPO_DIR}/build_${WN} --target install
   md5sum  ${REPO_DIR}/rtlsdr-bin-${WN}_${ZIP_POST}/bin/* >${REPO_DIR}/rtlsdr-bin-${WN}_${ZIP_POST}/bin/md5sums.txt
   sha1sum ${REPO_DIR}/rtlsdr-bin-${WN}_${ZIP_POST}/bin/* >${REPO_DIR}/rtlsdr-bin-${WN}_${ZIP_POST}/bin/sha1sums.txt
 fi
