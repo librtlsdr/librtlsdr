@@ -47,6 +47,8 @@
 static int do_exit = 0;
 static uint32_t iq_frames_to_read = 0;
 static rtlsdr_dev_t *dev = NULL;
+static WaveWriteState waveWrState;
+
 
 void usage(int verbosity)
 {
@@ -109,7 +111,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 			rtlsdr_cancel_async(dev);
 		}
 
-		if (!waveHdrStarted) {
+		if (!waveWrState.waveHdrStarted) {
 			size_t wr = fwrite(buf, 1, len, (FILE*)ctx);
 			if ( wr != len) {
 				fprintf(stderr, "Short write (wrote %ld of %ld bytes), samples lost, exiting!\n"
@@ -117,7 +119,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 				rtlsdr_cancel_async(dev);
 			}
 		} else {
-			if ( waveWriteFrames((FILE*)ctx, buf, len/2, 0) ) {
+			if ( waveWriteFrames(&waveWrState, (FILE*)ctx, buf, len/2, 0) ) {
 				fprintf(stderr, "Short write, samples lost, exiting!\n");
 				rtlsdr_cancel_async(dev);
 			}
@@ -158,6 +160,8 @@ int main(int argc, char **argv)
 	uint32_t samp_rate = DEFAULT_SAMPLE_RATE;
 	uint32_t out_block_size = DEFAULT_BUF_LENGTH;
 	int verbosity = 0;
+
+	initWaveWriteState(&waveWrState);
 
 	while ((opt = getopt(argc, argv, "d:f:g:s:w:b:n:p:O:SNHv")) != -1) {
 		switch (opt) {
@@ -304,7 +308,7 @@ int main(int argc, char **argv)
 			goto out;
 		}
 		if (writeWav) {
-			waveWriteHeader(samp_rate, frequency, 8, 2, file);
+			waveWriteHeader(&waveWrState, samp_rate, frequency, 8, 2, file);
 		}
 	}
 
@@ -325,7 +329,7 @@ int main(int argc, char **argv)
 				do_exit = 1;
 			}
 
-			if (!waveHdrStarted) {
+			if (!waveWrState.waveHdrStarted) {
 				size_t wr = fwrite(buffer, 1, n_read, file);
 				if (wr != (size_t)n_read) {
 					fprintf(stderr, "Short write (wrote %ld of %ld bytes), samples lost, exiting!\n"
@@ -333,7 +337,7 @@ int main(int argc, char **argv)
 					break;
 				}
 			} else {
-				if ( waveWriteSamples(file, buffer, n_read/2, 0) ) {
+				if ( waveWriteSamples(&waveWrState, file, buffer, n_read/2, 0) ) {
 					fprintf(stderr, "Short write, samples lost, exiting!\n");
 					break;
 				}
@@ -359,7 +363,7 @@ int main(int argc, char **argv)
 
 	if (file != stdout) {
 		if (writeWav) {
-			waveFinalizeHeader(file);
+			waveFinalizeHeader(&waveWrState, file);
 			fclose(file);
 			remove(filename);	/* delete, in case file already exists */
 			r = rename( tempfilename, filename );	/* #include <stdio.h> */

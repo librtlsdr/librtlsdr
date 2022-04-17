@@ -79,6 +79,8 @@ static int levelMaxMax = 0;
 static double levelSum = 0.0;
 static int32_t prev_if_band_center_freq = 0;
 
+static WaveWriteState waveWrState;
+
 
 enum trigExpr { crit_IN =0, crit_OUT, crit_LT, crit_GT };
 char * aCritStr[] = { "in", "out", "<", ">" };
@@ -212,9 +214,10 @@ void usage(int verbosity)
 		"\t[-m minimum_capture_rate Hz (default: 1m, min=900k, max=3.2m)]\n"
 		"\t[-v increase verbosity (default: 0)]\n"
 		"\t[-M modulation (default: fm)]\n"
-		"\t	fm or nbfm or nfm, wbfm or wfm, raw or iq, am, usb, lsb\n"
+		"\t	fm or nbfm or nfm, wbfm or wfm, raw or iq, am, ook, usb, lsb\n"
 		"\t	wbfm == -M fm -s 170k -o 4 -A fast -r 32k -l 0 -E deemp\n"
-		"\t	raw mode outputs 2x16 bit IQ pairs\n"
+		"\t	ook == -M am -E adc,  ook == -M am without adc option\n"
+		"\t	raw mode (==iq) outputs 2x16 bit I/Q pairs\n"
 		"\t[-s sample_rate (default: 24k)]\n"
 		"\t[-d device_index or serial (default: 0 , -1 or '-' for stdin)]\n"
 		"%s"
@@ -296,7 +299,7 @@ sighandler(int signum)
 #else
 static void sighandler(int signum)
 {
-	fprintf(stderr, "dongle %s: Signal caught, exiting!\n", dongleid);
+	fprintf(stderr, "dongle %s: Signal %d caught, exiting!\n", dongleid, signum);
 	do_exit = 1;
 	if (dongle.dev)
 		rtlsdr_cancel_async(dongle.dev);
@@ -803,7 +806,7 @@ static void *demod_thread_fn(void *arg)
 static void *output_thread_fn(void *arg)
 {
 	struct output_state *s = arg;
-	if (!waveHdrStarted) {
+	if (!waveWrState.waveHdrStarted) {
 		while (!do_exit) {
 			/* use timedwait and pad out under runs */
 			safe_cond_wait(&s->ready, &s->ready_m);
@@ -817,14 +820,14 @@ static void *output_thread_fn(void *arg)
 			safe_cond_wait(&s->ready, &s->ready_m);
 			pthread_rwlock_rdlock(&s->rw);
 			/* distinguish for endianness: wave requires little endian */
-			waveWriteSamples(s->file, s->result, s->result_len, 0);
+			waveWriteSamples(&waveWrState, s->file, s->result, s->result_len, 0);
 			pthread_rwlock_unlock(&s->rw);
 		}
 	}
 	return 0;
 }
 
-static void optimal_settings(uint64_t freq, uint32_t rate)
+static int optimal_settings(uint64_t freq, uint32_t rate)
 {
 	/* giant ball of hacks
 	 * seems unable to do a single pass, 2:1
@@ -837,7 +840,7 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	struct controller_state *cs = &controller;
 	dm->downsample = (MinCaptureRate / dm->rate_in) + 1;
 	if (dm->downsample_passes) {
-		dm->downsample_passes = (int)log2(dm->downsample) + 1;
+		dm->downsample_passes = (int)( ceil(log2(dm->downsample)) + 0.1);
 		if (dm->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
 			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", dm->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
 			dm->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
@@ -850,7 +853,14 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	capture_freq = freq;
 	capture_rate = dm->downsample * dm->rate_in;
 	if (verbosity >= 2)
-		fprintf(stderr, "capture_rate = dm->downsample * dm->rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
+		fprintf(stderr, "capture_rate = downsample * rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
+	if (capture_rate > 3200U*1000U) {
+		fprintf(stderr, "Error: Capture rate of %u Hz exceedds 3200k!\n", (unsigned)capture_rate);
+		return 1;
+	}
+	else if (capture_rate > 2400U*1000U) {
+		fprintf(stderr, "Warning: Capture rate of %u Hz is too big (exceeds 2400k) for continous transfer!\n", (unsigned)capture_rate);
+	}
 	if (!d->offset_tuning) {
 		capture_freq = freq - capture_rate/4;
 		if (verbosity >= 2)
@@ -862,6 +872,8 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	dm->output_scale = (1<<15) / (128 * dm->downsample);
 	if (dm->output_scale < 1) {
 		dm->output_scale = 1;}
+	if (verbosity >= 2)
+		fprintf(stderr, "output_scale = %d (used for AM/USB/LSB demodulation)\n", dm->output_scale);
 	if (dm->mode_demod == &fm_demod) {
 		dm->output_scale = 1;}
 	d->userFreq = freq;
@@ -869,6 +881,7 @@ static void optimal_settings(uint64_t freq, uint32_t rate)
 	d->rate = capture_rate;
 	if (verbosity >= 2)
 		fprintf(stderr, "optimal_settings(freq = %f MHz) delivers freq %f MHz, rate %.0f\n", freq * 1E-6, d->freq * 1E-6, (double)d->rate );
+	return 0;
 }
 
 static void *controller_thread_fn(void *arg)
@@ -1174,6 +1187,8 @@ int main(int argc, char **argv)
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
 	struct demod_state *demod = &dm_thr.demod;
+
+	initWaveWriteState(&waveWrState);
 	dongle_init(&dongle);
 	demod_thread_init(&dm_thr, &output, &cmd);
 	output_init(&output);
@@ -1308,7 +1323,13 @@ int main(int argc, char **argv)
 			if (strcmp("raw",  optarg) == 0 || strcmp("iq",  optarg) == 0) {
 				demod->mode_demod = &raw_demod;}
 			if (strcmp("am",  optarg) == 0) {
-				demod->mode_demod = &am_demod;}
+				demod->mode_demod = &am_demod;
+				demod->dc_block_audio = 1;	/* remove the DC */
+			}
+			if (strcmp("ook",  optarg) == 0) {
+				demod->mode_demod = &am_demod;
+				demod->dc_block_audio = 0;
+			}
 			if (strcmp("usb", optarg) == 0) {
 				demod->mode_demod = &usb_demod;}
 			if (strcmp("lsb", optarg) == 0) {
@@ -1494,7 +1515,7 @@ int main(int argc, char **argv)
 				int nChan = (demod->mode_demod == &raw_demod) ? 2 : 1;
 				int srate = (demod->rate_out2 > 0) ? demod->rate_out2 : demod->rate_out;
 				uint32_t f = controller.freqs[0];	/* only 1st frequency!!! */
-				waveWriteHeader(srate, f, 16, nChan, output.file);
+				waveWriteHeader(&waveWrState, srate, f, 16, nChan, output.file);
 			}
 		}
 	}
@@ -1547,7 +1568,7 @@ int main(int argc, char **argv)
 	if (output.file != stdout) {
 		if (writeWav) {
 			int r;
-			waveFinalizeHeader(output.file);
+			waveFinalizeHeader(&waveWrState, output.file);
 			fclose(output.file);
 			remove(output.filename);	/* delete, in case file already exists */
 			r = rename( output.tempfilename, output.filename );	/* #include <stdio.h> */

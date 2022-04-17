@@ -118,6 +118,7 @@ static unsigned num_detected_overflows = 0;
 static atomic_uint num_discarded_buffers = ATOMIC_VAR_INIT(0);
 static unsigned num_consec_overflows = 0;
 static struct timeval	tv_overflow_start;
+static int writeWav = 0;
 
 
 time_t stop_time;
@@ -138,6 +139,7 @@ struct file_thread_data
 	FILE *fptr[SLOTS_PER_CHANNEL];
 	atomic_int to_close[SLOTS_PER_CHANNEL];	/* => close to run */
 	atomic_int is_closing[SLOTS_PER_CHANNEL];	/* => close still running (in thread) */
+	WaveWriteState waveState;
 	atomic_int * p_sum_to_close;
 	int open_idx;		/* fptr[] idx to use for [p]open() */
 	pthread_t closing_thread;
@@ -298,7 +300,7 @@ void usage(int verbosity)
 		"\t	deemp:  enable de-emphasis filter\n"
 		"\t	direct: enable direct sampling (bypasses tuner, uses rtl2832 xtal)\n"
 		"\t[-q dc_avg_factor for option rdc (default: 9)]\n"
-		/* "\t[-H write wave Header to file (default: off)]\n" */
+		"\t[-H write wave Header to file (default: off)]\n"
 		"Experimental options:\n"
 		"\t[-F fir_size (default: off)]\n"
 		"\t	enables low-leakage downsample filter\n"
@@ -443,7 +445,8 @@ static FILE * open_pipe(const char *command, const char * st, int ch, int slot, 
 	return f;
 }
 
-static FILE * create_iq_file(const char* filename, const char * st, int ch, int slot, unsigned fno) {
+static FILE * create_iq_file(const char* filename, const char * st, int ch, int slot, unsigned fno,
+	WaveWriteState *waveWrState, unsigned freq, unsigned samplerate, int numChannels ) {
 	FILE * f = fopen(filename, "wb");
 	if(!f) {
 		fprintf(stderr, "dongle %s: Error: Could not create %u.th %s-channel %d slot %d file '%s' !\n", dongleid, fno, st, ch, slot, filename);
@@ -452,6 +455,10 @@ static FILE * create_iq_file(const char* filename, const char * st, int ch, int 
 	if (verbosity) {
 		fprintf(stdout, "dongle %s: %u.th %s-channel %d slot %d created: %s\n", dongleid, fno, st, ch, slot, filename);
 		fflush(stdout);
+	}
+	if (writeWav) {
+		initWaveWriteState(waveWrState);
+		waveWriteHeader(waveWrState, samplerate, freq, 16, numChannels, f);
 	}
 	return f;
 }
@@ -600,6 +607,8 @@ void close_all_channel_outputs(struct demod_thread_state *s, enum StreamType typ
 				}
 			}
 			else if (s->aud_write_type == WriteFILE && f) {
+				if ( writeWav )
+					waveFinalizeHeader( &ct->waveState, f );
 				fflush(f);
 				fclose(f);
 				ct->fptr[close_idx] = NULL;
@@ -642,6 +651,8 @@ void close_all_channel_outputs(struct demod_thread_state *s, enum StreamType typ
 				}
 			}
 			else if (s->mpx_write_type == WriteFILE && f) {
+				if ( writeWav )
+					waveFinalizeHeader( &ct->waveState, f );
 				fflush(f);
 				fclose(f);
 				ct->fptr[close_idx] = NULL;
@@ -684,6 +695,8 @@ void close_all_channel_outputs(struct demod_thread_state *s, enum StreamType typ
 				}
 			}
 			else if (s->cbb_write_type == WriteFILE && f) {
+				if ( writeWav )
+					waveFinalizeHeader( &ct->waveState, f );
 				fflush(f);
 				fclose(f);
 				ct->fptr[close_idx] = NULL;
@@ -717,7 +730,7 @@ void open_all_mpx_channel_outputs(struct demod_thread_state *s, const unsigned m
 		} else if (s->mpx_write_type == WriteFILE) {
 			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->mpx_file_pattern, ch, &ct->fno, freq, mpx_rate, milli, 0);
 			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
-			ct->fptr[open_idx] = create_iq_file(fnTim, "mpx", ch, open_idx, ct->fno);
+			ct->fptr[open_idx] = create_iq_file(fnTim, "mpx", ch, open_idx, ct->fno, &ct->waveState, freq, mpx_rate, 1);
 			s->actual_mpx_files[ch] = ct->fptr[open_idx];
 		}
 	}
@@ -747,7 +760,7 @@ void open_all_cbb_channel_outputs(struct demod_thread_state *s, const unsigned c
 		} else if (s->cbb_write_type == WriteFILE) {
 			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->cbb_file_pattern, ch, &ct->fno, freq, cbb_rate, milli, 0);
 			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
-			ct->fptr[open_idx] = create_iq_file(fnTim, "cbb", ch, open_idx, ct->fno);
+			ct->fptr[open_idx] = create_iq_file(fnTim, "cbb", ch, open_idx, ct->fno, &ct->waveState, freq, cbb_rate, 2);
 			s->actual_cbb_files[ch] = ct->fptr[open_idx];
 		}
 	}
@@ -778,14 +791,18 @@ void open_all_audio_channel_outputs(struct demod_thread_state *s, const unsigned
 		} else if (s->aud_write_type == WriteFILE) {
 			strfchannel(fnTmp, ARRAY_LEN(fnTmp), s->aud_file_pattern, ch, &ct->fno, freq, aud_rate, milli, 0);
 			strftime(fnTim, ARRAY_LEN(fnTim), fnTmp, tm);
-			ct->fptr[open_idx] = create_iq_file(fnTim, "audio", ch, open_idx, ct->fno);
+			ct->fptr[open_idx] = create_iq_file(fnTim, "audio", ch, open_idx, ct->fno, &ct->waveState, freq, aud_rate, 1);
 			s->actual_aud_files[ch] = ct->fptr[open_idx];
 		}
 	}
 }
 
 
-int full_demod(struct demod_state *d, FILE *f_cbb, FILE *f_mpx, FILE *f_aud, int *aud_frame_modulo, int aud_frame_size, int channel, int cbb_slot, int mpx_slot, int aud_slot)
+int full_demod(struct demod_state *d, FILE *f_cbb, FILE *f_mpx, FILE *f_aud,
+	int *aud_frame_modulo, int aud_frame_size,
+	int channel, int cbb_slot, int mpx_slot, int aud_slot,
+	struct demod_thread_state *mds
+	)
 {
 	int nwritten;
 	int errFlags = 0;	/* return is bitmask of error flags: value 1: mpx error; 2: audio error; 4: cbb error */
@@ -794,10 +811,19 @@ int full_demod(struct demod_state *d, FILE *f_cbb, FILE *f_mpx, FILE *f_aud, int
 
 
 	if (f_cbb) {
-		nwritten = (int)fwrite(d->lowpassed, 2, d->lp_len, f_cbb);
-		if (nwritten != d->lp_len) {
-			fprintf(stderr, "dongle %s: error writing %d samples to cbb-channel %d slot %d .. result %d\n", dongleid, d->lp_len, channel, cbb_slot, nwritten);
-			errFlags = errFlags | 4;
+		if ( writeWav && mds->cbb_write_type == WriteFILE ) {
+			nwritten = waveWriteFrames( &mds->cbb_files[channel].waveState, f_cbb, d->lowpassed, d->lp_len /2, 0 );
+			if (nwritten) {
+				fprintf(stderr, "dongle %s: error writing %d samples to cbb-channel %d slot %d\n", dongleid, d->lp_len, channel, cbb_slot);
+				errFlags = errFlags | 4;
+			}
+		}
+		else {
+			nwritten = (int)fwrite(d->lowpassed, 2, d->lp_len, f_cbb);
+			if (nwritten != d->lp_len) {
+				fprintf(stderr, "dongle %s: error writing %d samples to cbb-channel %d slot %d .. result %d\n", dongleid, d->lp_len, channel, cbb_slot, nwritten);
+				errFlags = errFlags | 4;
+			}
 		}
 	}
 
@@ -807,10 +833,19 @@ int full_demod(struct demod_state *d, FILE *f_cbb, FILE *f_mpx, FILE *f_aud, int
 	}
 
 	if (f_mpx) {
-		nwritten = (int)fwrite(d->result, 2, d->result_len, f_mpx);
-		if (nwritten != d->result_len) {
-			fprintf(stderr, "dongle %s: error writing %d samples to mpx-channel %d slot %d .. result %d\n", dongleid, d->result_len, channel, mpx_slot, nwritten);
-			errFlags = errFlags | 1;
+		if ( writeWav && mds->mpx_write_type == WriteFILE ) {
+			nwritten = waveWriteSamples( &mds->mpx_files[channel].waveState, f_mpx, d->result, d->result_len, 0 );
+			if (nwritten) {
+				fprintf(stderr, "dongle %s: error writing %d samples to mpx-channel %d slot %d\n", dongleid, d->result_len, channel, cbb_slot);
+				errFlags = errFlags | 1;
+			}
+		}
+		else {
+			nwritten = (int)fwrite(d->result, 2, d->result_len, f_mpx);
+			if (nwritten != d->result_len) {
+				fprintf(stderr, "dongle %s: error writing %d samples to mpx-channel %d slot %d .. result %d\n", dongleid, d->result_len, channel, mpx_slot, nwritten);
+				errFlags = errFlags | 1;
+			}
 		}
 	}
 
@@ -828,16 +863,25 @@ int full_demod(struct demod_state *d, FILE *f_cbb, FILE *f_mpx, FILE *f_aud, int
 		/* arbitrary_resample(d->result, d->result, d->result_len, d->result_len * d->rate_out2 / d->rate_out); */
 	}
 
-	nwritten = (int)fwrite(d->result, 2, d->result_len, f_aud);
+	if ( writeWav && mds->aud_write_type == WriteFILE ) {
+		nwritten = waveWriteSamples( &mds->aud_files[channel].waveState, f_aud, d->result, d->result_len, 0 );
+		if (nwritten) {
+			fprintf(stderr, "dongle %s: error writing %d samples to aud-channel %d slot %d\n", dongleid, d->result_len, channel, aud_slot);
+			errFlags = errFlags | 2;
+		}
+	}
+	else {
+		nwritten = (int)fwrite(d->result, 2, d->result_len, f_aud);
+		if (nwritten != d->result_len) {
+			fprintf(stderr, "dongle %s: error writing %d samples to aud-channel %d slot %d .. result %d\n", dongleid, d->result_len, channel, aud_slot, nwritten);
+			errFlags = errFlags | 2;
+		}
+	}
 	if (aud_frame_modulo && aud_frame_size) {
 		/* we want to split - only at multiples of 1152 samples, the frame size of an mp3
 		 * that is lcm(512, 1152) = 4608 == 9 x 512
 		 */
 		*aud_frame_modulo = (*aud_frame_modulo + d->result_len) % aud_frame_size;
-	}
-	if (nwritten != d->result_len) {
-		fprintf(stderr, "dongle %s: error writing %d samples to audio-channel %d slot %d .. result %d\n", dongleid, d->result_len, channel, aud_slot, nwritten);
-		errFlags = errFlags | 2;
 	}
 	return errFlags;
 }
@@ -1085,7 +1129,8 @@ static void *multi_demod_thread_fn(void *arg)
 					&mds->demod_states[ch],
 					mds->actual_cbb_files[ch], mds->actual_mpx_files[ch], mds->actual_aud_files[ch],
 					p_frame_modulo, mds->aud_frame_size,
-					ch, mds->cbb_files[ch].open_idx, mds->mpx_files[ch].open_idx, mds->aud_files[ch].open_idx
+					ch, mds->cbb_files[ch].open_idx, mds->mpx_files[ch].open_idx, mds->aud_files[ch].open_idx,
+					mds
 					);
 				/* stop writing to mpx or audio file with first error */
 				if (errFlags & 1)
@@ -1108,20 +1153,22 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 	uint32_t capture_rate;
 	struct dongle_state *d = &dongle;
 	struct demod_thread_state *dt = &dm_thr;
-	struct demod_state *config = &dt->demod_states[0];
-	config->downsample = (MinCaptureRate / config->rate_in) + 1;
-	if (config->downsample_passes) {
-		config->downsample_passes = (int)( ceil(log2(config->downsample)) + 0.1);
-		if (config->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
-			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", config->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
-			config->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
+	struct demod_state *dm = &dt->demod_states[0];
+	dm->downsample = (MinCaptureRate / dm->rate_in) + 1;
+	if (dm->downsample_passes) {
+		dm->downsample_passes = (int)( ceil(log2(dm->downsample)) + 0.1);
+		if (dm->downsample_passes > MAXIMUM_DOWNSAMPLE_PASSES) {
+			fprintf(stderr, "downsample_passes = %d exceeds it's limit. setting to %d\n", dm->downsample, MAXIMUM_DOWNSAMPLE_PASSES);
+			dm->downsample_passes = MAXIMUM_DOWNSAMPLE_PASSES;
 		}
-		config->downsample = 1 << config->downsample_passes;
+		dm->downsample = 1 << dm->downsample_passes;
 	}
 	if (verbosity >= 2) {
-		fprintf(stderr, "downsample_passes = %d (= # of fifth_order() iterations), downsample = %d\n", config->downsample_passes, config->downsample );
+		fprintf(stderr, "downsample_passes = %d (= # of fifth_order() iterations), downsample = %d\n", dm->downsample_passes, dm->downsample );
 	}
-	capture_rate = config->downsample * config->rate_in;
+	capture_rate = dm->downsample * dm->rate_in;
+	if (verbosity >= 2)
+		fprintf(stderr, "capture_rate = downsample * rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
 	if (capture_rate > 3200U*1000U) {
 		fprintf(stderr, "Error: Capture rate of %u Hz exceedds 3200k!\n", (unsigned)capture_rate);
 		return 1;
@@ -1130,14 +1177,14 @@ static int optimal_settings(uint64_t freq, uint32_t rate)
 		fprintf(stderr, "Warning: Capture rate of %u Hz is too big (exceeds 2400k) for continous transfer!\n", (unsigned)capture_rate);
 	}
 	if (verbosity >= 2)
-		fprintf(stderr, "capture_rate = dm->downsample * dm->rate_in = %d * %d = %d\n", config->downsample, config->rate_in, capture_rate );
-	config->output_scale = (1<<15) / (128 * config->downsample);
-	if (config->output_scale < 1) {
-		config->output_scale = 1;}
+		fprintf(stderr, "capture_rate = downsample * rate_in = %d * %d = %d\n", dm->downsample, dm->rate_in, capture_rate );
+	dm->output_scale = (1<<15) / (128 * dm->downsample);
+	if (dm->output_scale < 1) {
+		dm->output_scale = 1;}
 	if (verbosity >= 2)
-		fprintf(stderr, "output_scale = %d (used for AM/USB/LSB demodulation)\n", config->output_scale);
-	if (config->mode_demod == &fm_demod) {
-		config->output_scale = 1;}
+		fprintf(stderr, "output_scale = %d (used for AM/USB/LSB demodulation)\n", dm->output_scale);
+	if (dm->mode_demod == &fm_demod) {
+		dm->output_scale = 1;}
 	d->freq = freq;
 	d->rate = capture_rate;
 	if (verbosity >= 2)
@@ -1260,6 +1307,7 @@ void demod_thread_state_init(struct demod_thread_state *s)
 			s->aud_files[ch].to_close[slot] = ATOMIC_VAR_INIT(0);
 			s->aud_files[ch].is_closing[slot] = ATOMIC_VAR_INIT(0);
 		}
+		initWaveWriteState( &s->aud_files[ch].waveState );
 		s->aud_files[ch].p_sum_to_close = &s->sum_aud_to_close;
 		s->aud_files[ch].open_idx = 0;
 		s->aud_files[ch].stream_type = StreamAUD;
@@ -1273,6 +1321,7 @@ void demod_thread_state_init(struct demod_thread_state *s)
 			s->mpx_files[ch].to_close[slot] = ATOMIC_VAR_INIT(0);
 			s->mpx_files[ch].is_closing[slot] = ATOMIC_VAR_INIT(0);
 		}
+		initWaveWriteState( &s->mpx_files[ch].waveState );
 		s->mpx_files[ch].p_sum_to_close = &s->sum_mpx_to_close;
 		s->mpx_files[ch].open_idx = 0;
 		s->mpx_files[ch].stream_type = StreamMPX;
@@ -1286,6 +1335,7 @@ void demod_thread_state_init(struct demod_thread_state *s)
 			s->cbb_files[ch].to_close[slot] = ATOMIC_VAR_INIT(0);
 			s->cbb_files[ch].is_closing[slot] = ATOMIC_VAR_INIT(0);
 		}
+		initWaveWriteState( &s->cbb_files[ch].waveState );
 		s->cbb_files[ch].p_sum_to_close = &s->sum_cbb_to_close;
 		s->cbb_files[ch].open_idx = 0;
 		s->cbb_files[ch].stream_type = StreamCBB;
@@ -1414,16 +1464,16 @@ int main(int argc, char **argv)
 	FILE * dev_file = NULL;
 	int enable_biastee = 0;
 	const char * rtlOpts = NULL;
-	struct demod_state *demod = NULL;
 	enum rtlsdr_ds_mode ds_mode = RTLSDR_DS_IQ;
 	uint32_t ds_temp, ds_threshold = 0;
 	int timeConstant = 75; /* default: U.S. 75 uS */
 	int rtlagc = 0;
+	struct demod_state *demod = NULL;
 	dongle_init(&dongle);
 	demod_thread_state_init(&dm_thr);
 	demod = &dm_thr.demod_states[0];
 
-	while ((opt = getopt(argc, argv, "d:f:g:m:s:t:l:r:p:R:E:O:o:e:F:A:M:hTq:c:w:W:n:D:v")) != -1) {
+	while ((opt = getopt(argc, argv, "d:f:g:m:s:t:l:r:p:R:E:O:o:e:F:A:M:hTq:c:w:W:n:D:Hv")) != -1) {
 		switch (opt) {
 		case 'd':
 			if (strlen(optarg) >= 3 && !strncmp("f:", optarg, 2)) {
@@ -1678,6 +1728,9 @@ int main(int argc, char **argv)
 				ds_mode = (enum rtlsdr_ds_mode)ds_temp;
 			else
 				ds_threshold = ds_temp;
+			break;
+		case 'H':
+			writeWav = 1;
 			break;
 		case 'v':
 			++verbosity;
