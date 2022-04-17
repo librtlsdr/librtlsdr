@@ -4484,7 +4484,7 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed tuner gain = %d /10 dB\n", gain);
 			ret = rtlsdr_set_tuner_gain(dev, gain);
 		}
-		else if (!strncmp(optPart, "agcv=", 5)) {  /* previous option name */
+		else if (!strncmp(optPart, "agcv=", 5)) {  /* previous option name of "ifm=" */
 			int agcv = atoi(optPart +5);
 			if (verbose)
 				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed tuner if_mode = %d\n", agcv);
