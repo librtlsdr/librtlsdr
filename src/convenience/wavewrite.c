@@ -23,7 +23,7 @@
 #include <time.h>
 #include <assert.h>
 
-#ifndef _WIN32
+#ifndef _MSC_VER
 #include <unistd.h>
 #include <sys/time.h>
 #else
