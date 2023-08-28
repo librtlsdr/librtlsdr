@@ -247,7 +247,7 @@ enum rtlsdr_tuner {
 	RTLSDR_TUNER_FC0012,
 	RTLSDR_TUNER_FC0013,
 	RTLSDR_TUNER_FC2580,
-	RTLSDR_TUNER_R820T,		/* or R820T2 - R820T and R820T2 is not disdinguishable */
+	RTLSDR_TUNER_R820T,		/* or R820T2 - R820T, R820T2 and R860 are not distinguishable */
 	RTLSDR_TUNER_R828D
 };
 

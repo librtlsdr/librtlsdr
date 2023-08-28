@@ -1887,7 +1887,7 @@ int rtlsdr_get_tuner_gain(rtlsdr_dev_t *dev)
 	if (!dev)
 		return 0;
 
-	if (dev->tuner_type == RTLSDR_TUNER_R820T)
+	if (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D)
 		rf_gain = r82xx_get_rf_gain(&dev->r82xx_p);
 
 	return rf_gain;
@@ -2314,7 +2314,12 @@ int rtlsdr_set_ds_mode(rtlsdr_dev_t *dev, enum rtlsdr_ds_mode mode, uint32_t fre
 		case RTLSDR_TUNER_FC0013:	freq_threshold = 28800000; break; /* no idea!!! */
 		case RTLSDR_TUNER_FC2580:	freq_threshold = 28800000; break; /* no idea!!! */
 		case RTLSDR_TUNER_R820T:	freq_threshold = 24000000; break; /* ~ */
-		case RTLSDR_TUNER_R828D:	freq_threshold = 28800000; break; /* no idea!!! */
+		case RTLSDR_TUNER_R828D:
+			if ( rtlsdr_check_dongle_model(dev, "RTLSDRBlog", "Blog V4"))
+				freq_threshold = 1000;  /* have builtin up-converter: no need for direct sampling */
+			else
+				freq_threshold = 28800000; /* no idea!!! */
+			break;
 		}
 	}
 
@@ -2420,7 +2425,7 @@ int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev)
 
 int rtlsdr_set_dithering(rtlsdr_dev_t *dev, int dither)
 {
-	if (dev->tuner_type == RTLSDR_TUNER_R820T) {
+	if (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D) {
 		return r82xx_set_dither(&dev->r82xx_p, dither);
 	}
 	return 1;
@@ -3262,7 +3267,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	reg = rtlsdr_i2c_read_reg(dev, R820T_I2C_ADDR, R82XX_CHECK_ADDR);
 	if (reg == R82XX_CHECK_VAL) {
-		fprintf(stderr, "Found Rafael Micro R820T/2 tuner\n");
+		fprintf(stderr, "Found Rafael Micro R860 or 820T/2 tuner\n");
 		dev->tuner_type = RTLSDR_TUNER_R820T;
 		goto found;
 	}
@@ -4648,7 +4653,9 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 		softagc_init(dev);
 
 #ifdef WITH_UDP_SERVER
-	if (dev->udpPortNo && dev->srv_started == 0 && dev->tuner_type==RTLSDR_TUNER_R820T) {
+	if (dev->udpPortNo && dev->srv_started == 0 &&
+		(dev->tuner_type==RTLSDR_TUNER_R820T || dev->tuner_type==RTLSDR_TUNER_R828D) )
+	{
 		/* signal(SIGPIPE, SIG_IGN); */
 		if(pthread_create(&dev->srv_thread, NULL, srv_server, dev)) {
 			fprintf(stderr, "Error creating thread\n");
