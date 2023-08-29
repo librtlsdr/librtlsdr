@@ -30,6 +30,8 @@
 #include "rtlsdr_i2c.h"
 #include "tuner_r82xx.h"
 
+#include <rtl-sdr.h>
+
 #define WITH_ASYM_FILTER	0
 #define PRINT_PLL_ERRORS	0
 #define PRINT_VGA_REG		0
@@ -1551,8 +1553,8 @@ int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control
 	* Furthermore, this auto VGA needs to be looked at more closely, it appears to cause a lot of spectrum pumping
 	* and intermod on other devices. Fixed VGA gain always seems to yield better results.
 	*/
-	is_rtlsdr_blog_v4 = rtlsdr_check_dongle_model(priv->rtl_dev, "RTLSDRBlog", "Blog V4");
-	if(is_rtlsdr_blog_v4)
+	is_rtlsdr_blog_v4 = (rtlsdr_get_tuner_type(priv->rtl_dev) == RTLSDR_TUNER_BLOG_V4) ? 1 : 0;
+	if(0 && is_rtlsdr_blog_v4)
 	{
 		rc = r82xx_write_reg_mask(priv, 0x0c, 0x08, 0x9f);
 	}
@@ -2004,8 +2006,8 @@ int r82xx_set_freq64(struct r82xx_priv *priv, uint64_t freq)
 	int nth_harm;
 	int harm;
 
-	is_rtlsdr_blog_v4 = rtlsdr_check_dongle_model(priv->rtl_dev, "RTLSDRBlog", "Blog V4");
-        /* if it's an RTL-SDR Blog V4, automatically upconvert by 28.8 MHz if we tune to HF
+	is_rtlsdr_blog_v4 = (rtlsdr_get_tuner_type(priv->rtl_dev) == RTLSDR_TUNER_BLOG_V4) ? 1 : 0;
+	/* if it's an RTL-SDR Blog V4, automatically upconvert by 28.8 MHz if we tune to HF
 	 * so that we don't need to manually set any upconvert offset in the SDR software */
 	upconvert_freq = is_rtlsdr_blog_v4 ? ((freq < MHZ(28.8)) ? (freq + MHZ(28.8)) : freq) : freq;
 	harm = (priv->cfg->harmonic <= 0) ? DEFAULT_HARMONIC : priv->cfg->harmonic;

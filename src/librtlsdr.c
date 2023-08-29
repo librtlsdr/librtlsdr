@@ -386,7 +386,7 @@ int r820t_init(void *dev) {
 	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
 	devt->r82xx_p.rtl_dev = dev;
 
-	if (devt->tuner_type == RTLSDR_TUNER_R828D) {
+	if (devt->tuner_type == RTLSDR_TUNER_R828D || devt->tuner_type == RTLSDR_TUNER_BLOG_V4) {
 		devt->r82xx_c.i2c_addr = R828D_I2C_ADDR;
 		devt->r82xx_c.rafael_chip = CHIP_R828D;
 	} else {
@@ -627,18 +627,24 @@ static rtlsdr_tuner_iface_t tuners[] = {
 		_fc2580_set_freq, NULL, fc2580_set_bw, NULL, fc2580_set_gain, NULL,
 		fc2580_set_gain_mode, NULL, NULL, NULL, NULL, NULL
 	},
-	{
+	{	// RTLSDR_TUNER_R820T
 		r820t_init, r820t_exit,
 		r820t_set_freq, r820t_set_freq64, r820t_set_bw, r820t_set_bw_center, r820t_set_gain, NULL,
 		r820t_set_gain_mode, r820t_set_i2c_register, r820t_set_i2c_override, r820t_get_i2c_register, r820t_get_i2c_reg_array,
 		r820t_set_sideband
 	},
-	{
+	{	// RTLSDR_TUNER_R828D
 		r820t_init, r820t_exit,
 		r820t_set_freq, r820t_set_freq64, r820t_set_bw, r820t_set_bw_center, r820t_set_gain, NULL,
 		r820t_set_gain_mode, r820t_set_i2c_register, r820t_set_i2c_override, r820t_get_i2c_register, r820t_get_i2c_reg_array,
 		r820t_set_sideband
 	},
+	{	// RTLSDR_TUNER_BLOG_V4
+		r820t_init, r820t_exit,
+		r820t_set_freq, r820t_set_freq64, r820t_set_bw, r820t_set_bw_center, r820t_set_gain, NULL,
+		r820t_set_gain_mode, r820t_set_i2c_register, r820t_set_i2c_override, r820t_get_i2c_register, r820t_get_i2c_reg_array,
+		r820t_set_sideband
+	}
 };
 
 
@@ -809,6 +815,11 @@ static const char * dsmode_str[] = {
 "3: use I below threshold frequency",
 "4: use Q below threshold frequency"
 };
+
+static int isR82xxTuner(rtlsdr_dev_t *dev)
+{
+	return (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D || dev->tuner_type == RTLSDR_TUNER_BLOG_V4);
+}
 
 
 int rtlsdr_read_array(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *array, uint8_t len)
@@ -1541,7 +1552,7 @@ int rtlsdr_is_tuner_PLL_locked(rtlsdr_dev_t *dev)
 	if (!dev || !dev->tuner)
 		return -1;
 
-	if (dev->tuner_type != RTLSDR_TUNER_R820T && dev->tuner_type != RTLSDR_TUNER_R828D )
+	if (!isR82xxTuner(dev))
 		return -2;
 
 	rtlsdr_set_i2c_repeater(dev, 1);
@@ -1706,6 +1717,7 @@ const int * get_tuner_gains(rtlsdr_dev_t *dev, int *pNum )
 		break;
 	case RTLSDR_TUNER_R820T:
 	case RTLSDR_TUNER_R828D:
+	case RTLSDR_TUNER_BLOG_V4:
 		ptr = r82xx_gains; len = sizeof(r82xx_gains);
 		break;
 	default:
@@ -1835,7 +1847,7 @@ int rtlsdr_set_tuner_gain_ext(rtlsdr_dev_t *dev, int lna_gain, int mixer_gain, i
 {
 	int r = 0;
 
-	if (!dev || ( dev->tuner_type != RTLSDR_TUNER_R820T && dev->tuner_type != RTLSDR_TUNER_R828D ) )
+	if (!dev || !isR82xxTuner(dev))
 		return -1;
 
 	#if LOG_API_CALLS
@@ -1856,7 +1868,7 @@ int rtlsdr_set_tuner_if_mode(rtlsdr_dev_t *dev, int if_mode)
 {
 	int r = 0;
 
-	if (!dev || ( dev->tuner_type != RTLSDR_TUNER_R820T && dev->tuner_type != RTLSDR_TUNER_R828D ) )
+	if (!dev || !isR82xxTuner(dev))
 		return -1;
 
 	#if LOG_API_CALLS
@@ -1887,7 +1899,7 @@ int rtlsdr_get_tuner_gain(rtlsdr_dev_t *dev)
 	if (!dev)
 		return 0;
 
-	if (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D)
+	if (isR82xxTuner(dev))
 		rf_gain = r82xx_get_rf_gain(&dev->r82xx_p);
 
 	return rf_gain;
@@ -2247,8 +2259,7 @@ int rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 			rtlsdr_set_i2c_repeater(dev, 0);
 		}
 
-		if ((dev->tuner_type == RTLSDR_TUNER_R820T) ||
-				(dev->tuner_type == RTLSDR_TUNER_R828D)) {
+		if (isR82xxTuner(dev)) {
 			r |= rtlsdr_set_if_freq(dev, R82XX_IF_FREQ);
 
 			/* enable spectrum inversion */
@@ -2314,12 +2325,8 @@ int rtlsdr_set_ds_mode(rtlsdr_dev_t *dev, enum rtlsdr_ds_mode mode, uint32_t fre
 		case RTLSDR_TUNER_FC0013:	freq_threshold = 28800000; break; /* no idea!!! */
 		case RTLSDR_TUNER_FC2580:	freq_threshold = 28800000; break; /* no idea!!! */
 		case RTLSDR_TUNER_R820T:	freq_threshold = 24000000; break; /* ~ */
-		case RTLSDR_TUNER_R828D:
-			if ( rtlsdr_check_dongle_model(dev, "RTLSDRBlog", "Blog V4"))
-				freq_threshold = 1000;  /* have builtin up-converter: no need for direct sampling */
-			else
-				freq_threshold = 28800000; /* no idea!!! */
-			break;
+		case RTLSDR_TUNER_R828D:	freq_threshold = 28800000; break; /* no idea!!! */
+		case RTLSDR_TUNER_BLOG_V4:	freq_threshold = 1000; break; /* has builtin up-converter: no need for direct sampling */
 		}
 	}
 
@@ -2377,8 +2384,7 @@ int rtlsdr_set_offset_tuning(rtlsdr_dev_t *dev, int on)
 	if (!dev)
 		return -1;
 
-	if ((dev->tuner_type == RTLSDR_TUNER_R820T) ||
-			(dev->tuner_type == RTLSDR_TUNER_R828D))
+	if (isR82xxTuner(dev))
 		return -2;
 
 	if (dev->direct_sampling)
@@ -2425,7 +2431,7 @@ int rtlsdr_get_offset_tuning(rtlsdr_dev_t *dev)
 
 int rtlsdr_set_dithering(rtlsdr_dev_t *dev, int dither)
 {
-	if (dev->tuner_type == RTLSDR_TUNER_R820T || dev->tuner_type == RTLSDR_TUNER_R828D) {
+	if (isR82xxTuner(dev)) {
 		return r82xx_set_dither(&dev->r82xx_p, dither);
 	}
 	return 1;
@@ -3089,16 +3095,6 @@ void * srv_server(void *vdev)
 
 #endif
 
-/* Returns true if the manufact_check and product_check strings match what is in the dongles EEPROM */
-int rtlsdr_check_dongle_model(void *dev, char *manufact_check, char *product_check) {
-	if ((strcmp(((rtlsdr_dev_t *)dev)->manufact, manufact_check) == 0 && strcmp(((rtlsdr_dev_t *)dev)->product, product_check) == 0))
-	{
-		return 1;
-	}
-
-	return 0;
-}
-
 int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 {
 	int r;
@@ -3274,14 +3270,18 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 
 	reg = rtlsdr_i2c_read_reg(dev, R828D_I2C_ADDR, R82XX_CHECK_ADDR);
 	if (reg == R82XX_CHECK_VAL) {
-		fprintf(stderr, "Found Rafael Micro R828D tuner\n");
-
-		if (rtlsdr_check_dongle_model(dev, "RTLSDRBlog", "Blog V4"))
+		/* check dongles EEPROM */
+		if ( !strcmp(dev->manufact, "RTLSDRBlog") && !strcmp(dev->product, "Blog V4") )
 		{
-			fprintf(stderr, "RTL-SDR Blog V4 Detected\n");
+			fprintf(stderr, "Found RTL-SDR Blog V4 with Rafael Micro R828D tuner\n");
+			dev->tuner_type = RTLSDR_TUNER_BLOG_V4;
+		}
+		else
+		{
+			fprintf(stderr, "Found Rafael Micro R828D tuner\n");
+			dev->tuner_type = RTLSDR_TUNER_R828D;
 		}
 
-		dev->tuner_type = RTLSDR_TUNER_R828D;
 		goto found;
 	}
 
@@ -3379,11 +3379,11 @@ found:
 #endif
 		break;
 	case RTLSDR_TUNER_R828D:
-		// If NOT an RTL-SDR Blog V4, set typical R828D 16 MHz freq. Otherwise, keep at 28.8 MHz.
-		if (!(rtlsdr_check_dongle_model(dev, "RTLSDRBlog", "Blog V4")))
-		{
-			dev->tun_xtal = R828D_XTAL_FREQ;
-		}
+		// set typical R828D 16 MHz freq
+		dev->tun_xtal = R828D_XTAL_FREQ;
+		/* fall-through */
+	case RTLSDR_TUNER_BLOG_V4:
+		// keep at 28.8 MHz for an RTL-SDR Blog V4 with R828D tuner
 		/* fall-through */
 	case RTLSDR_TUNER_R820T:
 #if USE_OLD_DAB_IF_GAIN
@@ -3427,7 +3427,7 @@ found:
 	rtlsdr_set_i2c_repeater(dev, 0);
 
 #if INIT_R820T_TUNER_GAIN
-	if ( dev->tuner_type == RTLSDR_TUNER_R820T )
+	if ( isR82xxTuner(dev) )
 	{
 		rtlsdr_set_tuner_if_mode(dev, 10000 + 11);
 		rtlsdr_set_tuner_gain_mode(dev, 0);
@@ -4342,7 +4342,7 @@ int rtlsdr_set_harmonic_rx(rtlsdr_dev_t *dev, int harmonic)
 	if (!dev)
 		return -1;
 
-	if ( dev->tuner_type == RTLSDR_TUNER_R820T )
+	if (isR82xxTuner(dev))
 	{
 		if ( 0 <= harmonic && harmonic <= 16 )
 		{
@@ -4653,8 +4653,7 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 		softagc_init(dev);
 
 #ifdef WITH_UDP_SERVER
-	if (dev->udpPortNo && dev->srv_started == 0 &&
-		(dev->tuner_type==RTLSDR_TUNER_R820T || dev->tuner_type==RTLSDR_TUNER_R828D) )
+	if (dev->udpPortNo && dev->srv_started == 0 && isR82xxTuner(dev))
 	{
 		/* signal(SIGPIPE, SIG_IGN); */
 		if(pthread_create(&dev->srv_thread, NULL, srv_server, dev)) {

@@ -247,8 +247,9 @@ enum rtlsdr_tuner {
 	RTLSDR_TUNER_FC0012,
 	RTLSDR_TUNER_FC0013,
 	RTLSDR_TUNER_FC2580,
-	RTLSDR_TUNER_R820T,		/* or R820T2 - R820T, R820T2 and R860 are not distinguishable */
-	RTLSDR_TUNER_R828D
+	RTLSDR_TUNER_R820T,		/* R820T, R820T2 and R860 are not distinguishable */
+	RTLSDR_TUNER_R828D,
+	RTLSDR_TUNER_BLOG_V4	/* RTL-SDR BLOG V4 device with a R828D tuner from https://www.rtl-sdr.com/ */
 };
 
 /*!
