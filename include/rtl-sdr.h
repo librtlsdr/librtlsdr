@@ -432,6 +432,109 @@ RTLSDR_API int rtlsdr_set_testmode(rtlsdr_dev_t *dev, int on);
 RTLSDR_API int rtlsdr_set_agc_mode(rtlsdr_dev_t *dev, int on);
 
 /*!
+ * Enable or disable the internal 'Impulse Noise Cancellation' of the RTL2832.
+ * Some SDRs call this function 'Noise Blanker'.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param on: 1 means enabled, 0 disabled, -1 doesn't change
+ * \param reset_counter: 1 means reset; 0 means don't touch
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_set_impulse_nc(rtlsdr_dev_t* dev, int on, int reset_counter);
+
+/*!
+ * Retrieve the internal 'Impulse Noise Cancellation' status of the RTL2832.
+ * Some SDRs call this function 'Noise Blanker'.
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param on: pointer, where to store the value: 0 (=off) or 1 (=enabled)
+ * \param counter: pointer, where to store the 16-bit value: amount of occured cancallations?
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_get_impulse_nc(rtlsdr_dev_t* dev, int* on, int* counter);
+
+/*!
+ * Sets several parameters of the Analog Automatic Gain Control (AAGC) of the RTL2832.
+ * The RF and IF lines are (possibly) fed back to a tuner;
+ * i.e. it controls the VGA in an R820T/2.
+ * see http://superkuh.com/gnuradio/rtl2832u-datasheet-rev_1v4.pdf
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ *
+ * \param en_rf:  value in 0 .. 1; -1 for don't change
+ * \param inv_rf: value in 0 .. 1; -1 for don't change
+ * \param rf_gain_min: value in 0 .. 255; -1 for don't change
+ * \param rf_gain_max: value in 0 .. 255; -1 for don't change
+ *
+ * \param en_if:  value in 0 .. 1; -1 for don't change
+ * \param inv_if: value in 0 .. 1; -1 for don't change
+ * \param if_gain_min: value in 0 .. 255; -1 for don't change
+ * \param if_gain_max: value in 0 .. 255; -1 for don't change
+ *
+ * \param loop_gain_lock:         value in 0 .. 31; -1 for don't change
+ * \param loop_gain_unlock:       value in 0 .. 31; -1 for don't change
+ * \param loop_gain_interference: value in 0 .. 31; -1 for don't change
+ *
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_set_aagc(rtlsdr_dev_t* dev,
+	int en_rf, int inv_rf, int rf_gain_min, int rf_gain_max,
+	int en_if, int inv_if, int if_gain_min, int if_gain_max,
+	int loop_gain_lock, int loop_gain_unlock, int loop_gain_interference);
+
+
+/*!
+ * Gets several parameters of the Analog Automatic Gain Control (AAGC) of the RTL2832.
+ * The RF and IF lines are (possibly) fed back to a tuner;
+ * i.e. it controls the VGA in an R820T/2.
+ * see http://superkuh.com/gnuradio/rtl2832u-datasheet-rev_1v4.pdf
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param en_rf: pointer, where to store the value in 0 .. 255
+ * \param ...
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_get_aagc(rtlsdr_dev_t* dev,
+	int* en_rf, int* inv_rf, int* rf_gain_min, int* rf_gain_max,
+	int* en_if, int* inv_if, int* if_gain_min, int* if_gain_max,
+	int* loop_gain_lock, int* loop_gain_unlock, int* loop_gain_interference);
+
+/*!
+ * Sets RF/IF gain distribution of the Analog Automatic Gain Control (AAGC) of the RTL2832.
+ * see http://superkuh.com/gnuradio/rtl2832u-datasheet-rev_1v4.pdf
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param vtop[0..2]: 0 .. 63 or -1
+ * \param krf[0..3]:  0 .. 255 or -1
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_set_aagc_gain_distrib(rtlsdr_dev_t* dev,
+	int vtop[3], int krf[4]);
+
+/*!
+ * Gets RF/IF gain distribution of the Analog Automatic Gain Control (AAGC) of the RTL2832.
+ * see http://superkuh.com/gnuradio/rtl2832u-datasheet-rev_1v4.pdf
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param vtop[0..2]: 0 .. 63 or -1
+ * \param krf[0..3]:  0 .. 255 or -1
+ * \return 0 on success
+ */
+RTLSDR_API int rtlsdr_get_aagc_gain_distrib(rtlsdr_dev_t* dev,
+	int vtop[3], int krf[4]);
+
+/*!
+ * Checks, if the connection to the device is functional
+ * (it might have been removed from user)
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param timeout in milliseconds: 0 uses default of 300 ms
+ * \return 0 on success
+ */
+
+RTLSDR_API int rtlsdr_is_connected(rtlsdr_dev_t* dev, int timeout);
+
+/*!
  * Enable or disable the direct sampling mode. When enabled, the IF mode
  * of the RTL2832 is activated, and rtlsdr_set_center_freq() will control
  * the IF-frequency of the DDC, which can be used to tune from 0 to 28.8 MHz

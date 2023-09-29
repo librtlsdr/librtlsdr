@@ -220,6 +220,7 @@ struct rtlsdr_dev {
 	int rtl_vga_control;
 	/* tuner context */
 	enum rtlsdr_tuner tuner_type;
+	const char * tuner_str;
 	rtlsdr_tuner_iface_t *tuner;
 	uint32_t tun_xtal; /* Hz */
 	uint64_t freq; /* Hz */
@@ -937,7 +938,7 @@ int rtlsdr_write_reg(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint16_t v
 uint16_t rtlsdr_demod_read_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint8_t len)
 {
 	int r;
-	unsigned char data[2];
+	unsigned char data[2] = { 0 };
 
 	uint16_t index = page;
 	uint16_t reg;
@@ -1614,7 +1615,7 @@ int rtlsdr_set_freq_correction(rtlsdr_dev_t *dev, int ppm)
 		return -1;
 
 	if (dev->corr == ppm)
-		return -2;
+		return 0;
 
 	dev->corr = ppm;
 
@@ -2215,6 +2216,257 @@ int rtlsdr_set_agc_mode(rtlsdr_dev_t *dev, int on)
 	return rtlsdr_demod_write_reg(dev, 0, 0x19, on ? 0x25 : 0x05, 1);
 }
 
+
+int rtlsdr_set_impulse_nc(rtlsdr_dev_t* dev, int on, int reset_counter)
+{
+	int ron = 0, rreset = 0;
+	uint16_t reg_cnt, reset_val;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_set_impulse_nc(on %d, reset_counter %d)\n", on, reset_counter);
+#endif
+
+	if (!dev)
+		return -1;
+
+	if (on == 0 || on == 1)
+	{
+		reg_cnt = rtlsdr_demod_read_reg(dev, 1, 0x5D, 1);
+		reg_cnt = (reg_cnt  & (~1)) | on;
+		ron = rtlsdr_demod_write_reg(dev, 1, 0x5D, reg_cnt, 1);
+	}
+
+	if (reset_counter)
+	{
+		reg_cnt = rtlsdr_demod_read_reg(dev, 1, 0x5E, 1);
+		reset_val = (uint16_t)1U << 6;
+		rreset = rtlsdr_demod_write_reg(dev, 1, 0x5E, reg_cnt | reset_val, 1);
+		rreset = rtlsdr_demod_write_reg(dev, 1, 0x5E, reg_cnt & (~reset_val), 1) | rreset;
+	}
+
+	return (ron ? ron : rreset);
+}
+
+int rtlsdr_get_impulse_nc(rtlsdr_dev_t* dev, int *on, int *counter)
+{
+	uint16_t reg_on, reg_cnt_lo, reg_cnt_hi;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_get_impulse_nc()\n");
+#endif
+
+	if (!dev || !on || !counter)
+		return -1;
+
+	reg_on = rtlsdr_demod_read_reg(dev, 1, 0x5D, 1) & 1;
+	reg_cnt_hi = rtlsdr_demod_read_reg(dev, 3, 0x28, 1) & 0xFF;
+	reg_cnt_lo = rtlsdr_demod_read_reg(dev, 3, 0x29, 1) & 0xFF;
+	*on = reg_on;
+	*counter = ((unsigned)reg_cnt_hi << 8) | (unsigned)reg_cnt_lo;
+
+	return 0;
+}
+
+int rtlsdr_set_aagc(rtlsdr_dev_t* dev,
+	int en_rf, int inv_rf, int rf_gain_min, int rf_gain_max,
+	int en_if, int inv_if, int if_gain_min, int if_gain_max,
+	int loop_gain_lock, int loop_gain_unlock, int loop_gain_interference)
+{
+	int r = 0, rr = 0;
+	uint16_t min_val, max_val;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_set_agc_limits(rf_gain_min %u, rf_gain_max %u, if_gain_min %u, if_gain_max %u)\n",
+		rf_gain_min, rf_gain_max, if_gain_min, if_gain_max);
+#endif
+
+	if (!dev)
+		return -1;
+
+	if (0 <= rf_gain_min && rf_gain_min < 256) {
+		min_val = (uint16_t)rf_gain_min - (uint16_t)128U;
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x0A, min_val, 1);
+		r = r ? r : rr;
+	}
+
+	if (0 <= rf_gain_max && rf_gain_max < 256) {
+		max_val = (uint16_t)rf_gain_max - (uint16_t)128U;
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x0B, max_val, 1);
+		r = r ? r : rr;
+	}
+
+	if (0 <= if_gain_min  && if_gain_min < 256) {
+		min_val = (uint16_t)if_gain_min - (uint16_t)128U;
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x08, min_val, 1);
+		r = r ? r : rr;
+	}
+	if (0 <= if_gain_max && if_gain_max < 256) {
+		max_val = (uint16_t)if_gain_max - (uint16_t)128U;
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x09, max_val, 1);
+		r = r ? r : rr;
+	}
+
+	min_val = max_val = rtlsdr_demod_read_reg(dev, 0, 0x0E, 1) & 0xFFU;
+	if (0 <= inv_rf && inv_rf < 2)
+		min_val = (min_val & ~0x02) | (inv_rf ? 0x02 : 0x00);
+	if (0 <= inv_if && inv_if < 2)
+		min_val = (min_val & ~0x01) | (inv_if ? 0x01 : 0x00);
+	if (min_val != max_val) {
+		rr = rtlsdr_demod_write_reg(dev, 0, 0x0E, min_val, 1);
+		r = r ? r : rr;
+	}
+
+	min_val = max_val = rtlsdr_demod_read_reg(dev, 0, 0x04, 1) & 0xFFU;
+	if (0 <= en_rf && en_rf < 2)
+		min_val = (min_val & ~0x40) | (en_rf ? 0x40 : 0x00);
+	if (0 <= en_if && en_if < 2)
+		min_val = (min_val & ~0x80) | (en_if ? 0x80 : 0x00);
+	if (min_val != max_val) {
+		rr = rtlsdr_demod_write_reg(dev, 0, 0x04, min_val, 1);
+		r = r ? r : rr;
+	}
+
+	if (0 <= loop_gain_lock && loop_gain_lock < 32)
+	{
+		min_val = rtlsdr_demod_read_reg(dev, 1, 0x04, 1) & 0xFFU;
+		max_val = rtlsdr_demod_read_reg(dev, 1, 0x05, 1) & 0xFFU;
+		min_val = (min_val & ~(0x0FU << 1)) | ((loop_gain_lock & 0x0FU) << 1);
+		max_val = (max_val & ~0x80U) | ((loop_gain_lock & 0x10U) << 3);
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x04, min_val, 1);
+		r = r ? r : rr;
+		rr = rtlsdr_demod_write_reg(dev, 1, 0x05, max_val, 1);
+		r = r ? r : rr;
+	}
+
+	if (0 <= loop_gain_unlock && loop_gain_unlock < 32)
+	{
+		min_val = rtlsdr_demod_read_reg(dev, 1, 0xC7, 1) & 0xFFU;
+		min_val = (min_val & ~(0x1FU << 1)) | ((loop_gain_unlock & 0x1FU) << 1);
+		rr = rtlsdr_demod_write_reg(dev, 1, 0xC7, min_val, 1);
+		r = r ? r : rr;
+	}
+
+	if (0 <= loop_gain_interference && loop_gain_interference < 32)
+	{
+		min_val = rtlsdr_demod_read_reg(dev, 1, 0xC8, 1) & 0xFFU;
+		min_val = (min_val & ~0x1FU) | (loop_gain_interference & 0x1FU);
+		rr = rtlsdr_demod_write_reg(dev, 1, 0xC8, min_val, 1);
+		r = r ? r : rr;
+	}
+
+	return r;
+}
+
+int rtlsdr_get_aagc(rtlsdr_dev_t* dev,
+	int* en_rf, int* inv_rf, int* rf_gain_min, int* rf_gain_max,
+	int* en_if, int* inv_if, int* if_gain_min, int* if_gain_max,
+	int* loop_gain_lock, int* loop_gain_unlock, int* loop_gain_interference
+	)
+{
+	uint16_t reg_min, reg_max;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_get_agc_limits()\n");
+#endif
+
+	if (!dev
+		|| !en_rf || !inv_rf || !rf_gain_min || !rf_gain_max
+		|| !en_if || !inv_if || !if_gain_min || !if_gain_max
+		|| !loop_gain_lock || !loop_gain_unlock || !loop_gain_interference
+		)
+		return -1;
+
+	reg_min = rtlsdr_demod_read_reg(dev, 0, 0x0E, 1) & 0xFFU;
+	*inv_rf = (reg_min & 0x02) ? 1 : 0;
+	*inv_if = (reg_min & 0x01) ? 1 : 0;
+
+	reg_min = rtlsdr_demod_read_reg(dev, 0, 0x04, 1) & 0xFFU;
+	*en_rf = (reg_min & 0x40) ? 1 : 0;
+	*en_if = (reg_min & 0x80) ? 1 : 0;
+
+	reg_min = rtlsdr_demod_read_reg(dev, 1, 0x0A, 1) & 0xFFU;
+	reg_max = rtlsdr_demod_read_reg(dev, 1, 0x0B, 1) & 0xFFU;
+	*rf_gain_min = (reg_min < 128U) ? (128U + reg_min) : ((128U + reg_min) & 0xFFU);
+	*rf_gain_max = (reg_max < 128U) ? (128U + reg_max) : ((128U + reg_max) & 0xFFU);
+
+	reg_min = rtlsdr_demod_read_reg(dev, 1, 0x08, 1) & 0xFFU;
+	reg_max = rtlsdr_demod_read_reg(dev, 1, 0x09, 1) & 0xFFU;
+	*if_gain_min = (reg_min < 128U) ? (128U + reg_min) : ((128U + reg_min) & 0xFFU);
+	*if_gain_max = (reg_max < 128U) ? (128U + reg_max) : ((128U + reg_max) & 0xFFU);
+
+	// loop_gain2<3:0>: page 1, offset 0x04: [4:1] (dflt: 0)  Loop Gain for AAGC Lock
+	// loop_gain2<4>:   page 1, offset 0x05, [7]   (dflt: 1)   -"-
+	reg_min = rtlsdr_demod_read_reg(dev, 1, 0x04, 1) & 0xFFU;
+	reg_max = rtlsdr_demod_read_reg(dev, 1, 0x05, 1) & 0xFFU;
+	*loop_gain_lock = ((reg_min >> 1) & 0x0F) | ((reg_max >> 3) & 0x10);
+
+	// loop_gain1       page 1, offset 0xC7, [5:1] (dflt: C)  Loop Gain for AAGC Unlock
+	reg_min = rtlsdr_demod_read_reg(dev, 1, 0xC7, 1) & 0xFFU;
+	*loop_gain_unlock = (reg_min >> 1) & 0x1F;
+
+	// loop_gain3       page 1, offset 0xC8, [4:0] (dflt: 1A) Loop Gain for existing Interference
+	reg_min = rtlsdr_demod_read_reg(dev, 1, 0xC8, 1) & 0xFFU;
+	*loop_gain_interference = reg_min & 0x1F;
+
+	// aagc_hold:       page 1, offset 0x04: [5]   (dflt: 0)  Hold AAGC Value (Open AAGC Loop)
+	return 0;
+}
+
+int rtlsdr_set_aagc_gain_distrib(rtlsdr_dev_t* dev,
+	int vtop[3], int krf[4])
+{
+	uint16_t vtop_addr[3] = { 0x06, 0xC9, 0xCA };
+	uint16_t krf_addr[4] = { 0xCB, 0x07, 0xCD, 0xCE };
+	int r = 0, rr = 0, k;
+	uint16_t min_val, max_val;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_set_agc_gain_distrib(vtop[] = %d, %d, %d, krf[] = %d, %d, %d, %d)\n",
+		vtop[0], vtop[1], vtop[2],
+		krf[0], krf[1], krf[2], krf[3]);
+#endif
+
+	if (!dev)
+		return -1;
+
+	for (k = 0; k < 3; ++k)
+	{
+		if (0 <= vtop[k] && vtop[k] < 64)
+		{
+			rr = rtlsdr_demod_write_reg(dev, 1, vtop_addr[k], (uint16_t)vtop[k], 1);
+			r = r ? r : rr;
+		}
+	}
+	for (k = 0; k < 4; ++k)
+	{
+		if (0 <= krf[k] && krf[k] < 256)
+		{
+			rr = rtlsdr_demod_write_reg(dev, 1, krf_addr[k], (uint16_t)krf[k], 1);
+			r = r ? r : rr;
+		}
+	}
+
+	return r;
+}
+
+int rtlsdr_get_aagc_gain_distrib(rtlsdr_dev_t* dev,
+	int vtop[3], int krf[4])
+{
+	uint16_t vtop_addr[3] = { 0x06, 0xC9, 0xCA };
+	uint16_t krf_addr[4] = { 0xCB, 0x07, 0xCD, 0xCE };
+	int r = 0, rr = 0, k;
+	uint16_t min_val, max_val;
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_get_agc_gain_distrib()\n");
+#endif
+
+	if (!dev)
+		return -1;
+
+	for (k = 0; k < 3; ++k)
+		vtop[k] = rtlsdr_demod_read_reg(dev, 1, vtop_addr[k], 1) & 0x3FU;
+	for (k = 0; k < 4; ++k)
+		krf[k] = rtlsdr_demod_read_reg(dev, 1, krf_addr[k], 1) & 0xFFU;
+
+	return r;
+}
+
+
 int rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 {
 	int r = 0;
@@ -2286,6 +2538,26 @@ int rtlsdr_set_direct_sampling(rtlsdr_dev_t *dev, int on)
 	r |= rtlsdr_set_center_freq64(dev, dev->freq);
 
 	return r;
+}
+
+int rtlsdr_is_connected(rtlsdr_dev_t* dev, int timeout_millis)
+{
+	int r;
+	unsigned char data[2] = { 0 };
+	uint16_t addr = (0x15 << 8) | 0x20;  // read a random register; here: spec_inv of DDC
+	const uint16_t page = 1;
+	const uint8_t len = 1;
+
+#if LOG_API_CALLS
+	fprintf(stderr, "LOG: rtlsdr_is_connected(timeout %d)\n", timeout);
+#endif
+	if (!dev)
+		return -1;
+
+	if (timeout_millis <= 0)
+		timeout_millis = CTRL_TIMEOUT;
+	r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, page, data, len, timeout_millis);
+	return (r < 0 ? -2 : 0);
 }
 
 int rtlsdr_get_direct_sampling(rtlsdr_dev_t *dev)
@@ -3255,6 +3527,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	if (reg == E4K_CHECK_VAL) {
 		fprintf(stderr, "Found Elonics E4000 tuner\n");
 		dev->tuner_type = RTLSDR_TUNER_E4000;
+		dev->tuner_str = "E4000";
 		goto found;
 	}
 
@@ -3262,6 +3535,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	if (reg == FC0013_CHECK_VAL) {
 		fprintf(stderr, "Found Fitipower FC0013 tuner\n");
 		dev->tuner_type = RTLSDR_TUNER_FC0013;
+		dev->tuner_str = "FC0013";
 		goto found;
 	}
 
@@ -3269,6 +3543,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	if (reg == R82XX_CHECK_VAL) {
 		fprintf(stderr, "Found Rafael Micro R860 or 820T/2 tuner\n");
 		dev->tuner_type = RTLSDR_TUNER_R820T;
+		dev->tuner_str = "R860/820T/2";
 		goto found;
 	}
 
@@ -3279,11 +3554,13 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 		{
 			fprintf(stderr, "Found RTL-SDR Blog V4 with Rafael Micro R828D tuner\n");
 			dev->tuner_type = RTLSDR_TUNER_BLOG_V4;
+			dev->tuner_str = "BlogV4";
 		}
 		else
 		{
 			fprintf(stderr, "Found Rafael Micro R828D tuner\n");
 			dev->tuner_type = RTLSDR_TUNER_R828D;
+			dev->tuner_str = "R828D";
 		}
 
 		goto found;
@@ -3300,6 +3577,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 	if ((reg & 0x7f) == FC2580_CHECK_VAL) {
 		fprintf(stderr, "Found FCI 2580 tuner\n");
 		dev->tuner_type = RTLSDR_TUNER_FC2580;
+		dev->tuner_str = "FC2580";
 		goto found;
 	}
 
@@ -3308,6 +3586,7 @@ int rtlsdr_open(rtlsdr_dev_t **out_dev, uint32_t index)
 		fprintf(stderr, "Found Fitipower FC0012 tuner\n");
 		rtlsdr_set_gpio_output(dev, 6);
 		dev->tuner_type = RTLSDR_TUNER_FC0012;
+		dev->tuner_str = "FC0012";
 		/* rtlsdr_set_gpio_output(dev, 5); */
 		/* rtlsdr_set_gpio_bit(dev, 5, 1); */
 		goto found;
@@ -3439,6 +3718,9 @@ found:
 #endif
 
 	*out_dev = dev;
+	if (dev->verbose)
+		fprintf(stderr, "rtlsdr_open(%u) opened %s/%s tuner %s\n", (unsigned)index, dev->manufact, dev->product, dev->tuner_str);
+
 	return 0;
 err:
 	if (dev) {
@@ -3450,6 +3732,9 @@ err:
 
 		free(dev);
 	}
+
+	if (dev->verbose && r)
+		fprintf(stderr, "rtlsdr_open(%u) failed with rc %d\n", (unsigned)index, r);
 
 	return r;
 }
@@ -3482,6 +3767,14 @@ int rtlsdr_close(rtlsdr_dev_t *dev)
 #else
 			usleep(1000);
 #endif
+		}
+
+		if (dev->verbose)
+		{
+			int inc_rc, inc_on, inc_counter;
+			inc_rc = rtlsdr_get_impulse_nc(dev, &inc_on, &inc_counter);
+			if (!inc_rc && inc_on)
+				fprintf(stderr, "rtlsdr(%s/%s tuner %s): impulse noise cancellation counter: %d\n", dev->manufact, dev->product, dev->tuner_str, inc_counter);
 		}
 
 		if (dev->standby_after_close)
@@ -4409,6 +4702,7 @@ const char * rtlsdr_get_opt_help(int longInfo)
 		"\t\t                        default port number: 32323\n"
 #endif
 		"\t\tstandby=<on>          1 activates standby after close, 0 deactivates to keep heated-up\n"
+		"\t\tinc=<on>              1 activates the impulse noise cancellation (=default), 0 deactivates it\n"
 		;
 	else
 		return
@@ -4424,7 +4718,7 @@ const char * rtlsdr_get_opt_help(int longInfo)
 #else
 		"\t\tds=<direct_sampling>:dm=<ds_mode_thresh>:T=<bias_tee>"
 #endif
-		"\t\t:standby=<en>\n"
+		"\t\t:standby=<en>:inc=<en>\n"
 #ifdef WITH_UDP_SERVER
 		"\t\tport=<udp_port default with 1>\n"
 #endif
@@ -4652,6 +4946,12 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed standby %d\n", on);
 			ret = rtlsdr_standby_after_close(dev, on);
 		}
+		else if (!strncmp(optPart, "inc=", 4)) {
+			int on = atoi(optPart +4);
+			if (verbose)
+				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed impulse noise cancellation %d\n", on);
+			ret = rtlsdr_set_impulse_nc(dev, on, 1);
+		}
 		else if (*optPart) {
 			if (verbose)
 				fprintf(stderr, "\nrtlsdr_set_opt_string(): parsed unknown option '%s'\n", optPart);
@@ -4685,6 +4985,10 @@ int rtlsdr_set_opt_string(rtlsdr_dev_t *dev, const char *opts, int verbose)
 		}
 	}
 #endif
+
+	if (dev->verbose)
+		fprintf(stderr, "rtlsdr_set_opt_string('%s') returned %d for %s/%s tuner %s\n",
+			optStr, retAll, dev->manufact, dev->product, dev->tuner_str);
 
 	free(optStr);
 	return retAll;
