@@ -315,13 +315,20 @@ int e4000_set_freq(void *dev, uint32_t freq) {
 
 int e4000_set_bw(void *dev, int bw, uint32_t *applied_bw, int apply) {
 	int r = 0;
+	uint32_t abw, abw_min = (uint32_t)-1;
 	rtlsdr_dev_t* devt = (rtlsdr_dev_t*)dev;
-	if(!apply)
-		return 0;
 
-	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_MIX, bw);
-	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_RC, bw);
-	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_CHAN, bw);
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_MIX, bw, apply, &abw);
+	abw_min = (abw < abw_min) ? abw : abw_min;
+
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_RC, bw, apply, &abw);
+	abw_min = (abw < abw_min) ? abw : abw_min;
+
+	r |= e4k_if_filter_bw_set(&devt->e4k_s, E4K_IF_FILTER_CHAN, bw, apply, &abw);
+	abw_min = (abw < abw_min) ? abw : abw_min;
+
+	if (applied_bw)
+		*applied_bw = abw_min;
 
 	return r;
 }
