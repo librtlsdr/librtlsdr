@@ -827,29 +827,33 @@ static int isR82xxTuner(rtlsdr_dev_t *dev)
 
 int rtlsdr_read_array(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *array, uint8_t len)
 {
-	int r;
+	int r, retry;
 	uint16_t index = (block << 8);
 	if (block == IRB) index = (SYSB << 8) | 0x01;
 
-	r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, array, len, CTRL_TIMEOUT);
-#if 0
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
-#endif
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, array, len, CTRL_TIMEOUT);
+		if (r < 0 && dev->verbose)
+			fprintf(stderr, "%s (block %d, addr 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)block, (int)addr, (int)len, retry, r);
+	}
 	return r;
 }
 
 int rtlsdr_write_array(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *array, uint8_t len)
 {
-	int r;
+	int r, retry;
 	uint16_t index = (block << 8) | 0x10;
 	if (block == IRB) index = (SYSB << 8) | 0x11;
 
-	r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, array, len, CTRL_TIMEOUT);
-#if 0
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
-#endif
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, array, len, CTRL_TIMEOUT);
+		if (r < 0 && dev->verbose)
+			fprintf(stderr, "%s (block %d, addr 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)block, (int)addr, (int)len, retry, r);
+	}
 	return r;
 }
 
@@ -896,16 +900,19 @@ int rtlsdr_i2c_read(rtlsdr_dev_t *dev, uint8_t i2c_addr, uint8_t *buffer, int le
 
 uint16_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t len)
 {
-	int r;
+	int r, retry;
 	unsigned char data[2];
 	uint16_t reg;
 	uint16_t index = (block << 8);
 	if (block == IRB) index = (SYSB << 8) | 0x01;
 
-	r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
-
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
+		if (r < 0)
+			fprintf(stderr, "%s (block %d, addr 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)block, (int)addr, (int)len, retry, r);
+	}
 
 	reg = (data[1] << 8) | data[0];
 
@@ -914,7 +921,7 @@ uint16_t rtlsdr_read_reg(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_
 
 int rtlsdr_write_reg(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint16_t val, uint8_t len)
 {
-	int r;
+	int r, retry;
 	unsigned char data[2];
 
 	uint16_t index = (block << 8) | 0x10;
@@ -927,28 +934,33 @@ int rtlsdr_write_reg(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint16_t v
 
 	data[1] = val & 0xff;
 
-	r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, data, len, CTRL_TIMEOUT);
-
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, data, len, CTRL_TIMEOUT);
+		if (r < 0 && dev->verbose)
+			fprintf(stderr, "%s (block %d, addr 0x%04x, value 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)block, (int)addr, (int)val, (int)len, retry, r);
+	}
 
 	return r;
 }
 
 uint16_t rtlsdr_demod_read_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint8_t len)
 {
-	int r;
+	int r, retry;
 	unsigned char data[2] = { 0 };
 
 	uint16_t index = page;
 	uint16_t reg;
 	addr = (addr << 8) | 0x20;
 
-	r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
-
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
-
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
+		if (r < 0)
+			fprintf(stderr, "%s (page %d, addr %04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)page, (int)addr, (int)len, retry, r);
+	}
 	reg = (data[1] << 8) | data[0];
 
 	return reg;
@@ -956,7 +968,7 @@ uint16_t rtlsdr_demod_read_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, u
 
 int rtlsdr_demod_write_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint16_t val, uint8_t len)
 {
-	int r;
+	int r, retry;
 	unsigned char data[2];
 	uint16_t index = 0x10 | page;
 	addr = (addr << 8) | 0x20;
@@ -968,11 +980,13 @@ int rtlsdr_demod_write_reg(rtlsdr_dev_t *dev, uint8_t page, uint16_t addr, uint1
 
 	data[1] = val & 0xff;
 
-	r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, data, len, CTRL_TIMEOUT);
-
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
-
+	for (retry = 0; (!retry || r < 0 || r != len) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_OUT, 0, addr, index, data, len, CTRL_TIMEOUT);
+		if (r < 0 || r != len)
+			fprintf(stderr, "%s (page %d, addr 0x%04x, value 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)page, (int)addr, (int)val, (int)len, retry, r);
+	}
 	rtlsdr_demod_read_reg(dev, 0x0a, 0x01, 1);
 
 	return (r == len) ? 0 : -1;
@@ -4482,14 +4496,17 @@ struct rtl28xxu_reg_val_mask {
 
 static int rtlsdr_read_regs(rtlsdr_dev_t *dev, uint8_t block, uint16_t addr, uint8_t *data, uint8_t len)
 {
-	int r;
+	int r, retry;
 	uint16_t index = (block << 8);
 	if (block == IRB) index = (SYSB << 8) | 0x01;
 
-	r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
-
-	if (r < 0)
-		fprintf(stderr, "%s failed with %d\n", __FUNCTION__, r);
+	for (retry = 0; (!retry || r < 0) && retry < 3; ++retry)
+	{
+		r = libusb_control_transfer(dev->devh, CTRL_IN, 0, addr, index, data, len, CTRL_TIMEOUT);
+		if (r < 0)
+			fprintf(stderr, "%s (block %d, addr 0x%04x, len %d) failed at try %d with libusb rc %d\n",
+				__FUNCTION__, (int)block, (int)addr, (int)len, retry, r);
+	}
 
 	return r;
 }
