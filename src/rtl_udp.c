@@ -880,10 +880,6 @@ int main(int argc, char **argv)
 	if (r < 0)
 		fprintf(stderr, "WARNING: Failed to set sample rate.\n");
 
-	if (rtlOpts) {
-		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
-	}
-
 	/* Set direct sampling with threshold */
 	rtlsdr_set_ds_mode(dev, ds_mode, ds_threshold);
 
@@ -917,6 +913,10 @@ int main(int argc, char **argv)
 	rtlsdr_set_bias_tee(dev, enable_biastee);
 	if (enable_biastee)
 		fprintf(stderr, "activated bias-T on GPIO PIN 0\n");
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
+	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */
 	r = rtlsdr_reset_buffer(dev);

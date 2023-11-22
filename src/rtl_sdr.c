@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -191,8 +192,16 @@ int main(int argc, char **argv)
 			out_block_size = (uint32_t)atof(optarg);
 			break;
 		case 'n':
-			iq_frames_to_read = (uint32_t)atof(optarg);
+		{
+			double tmp_arg = atofs(optarg);
+			if (tmp_arg > UINT32_MAX) {
+				iq_frames_to_read = UINT32_MAX;
+				fprintf(stderr, "limited number of samples to record\n");
+			}
+			else
+				iq_frames_to_read = (uint32_t)tmp_arg;
 			break;
+		}
 		case 'S':
 			sync_mode = 1;
 			break;
@@ -268,11 +277,14 @@ int main(int argc, char **argv)
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, samp_rate);
 
+	/* Set the frequency */
+	verbose_set_frequency(dev, frequency);
+
 	/* Set the tuner bandwidth */
 	verbose_set_bandwidth(dev, bandwidth);
 
-	/* Set the frequency */
-	verbose_set_frequency(dev, frequency);
+	if (verbosity && bandwidth)
+		verbose_list_bandwidths(dev);
 
 	if (0 == gain) {
 		 /* Enable automatic gain */
@@ -281,10 +293,6 @@ int main(int argc, char **argv)
 		/* Enable manual gain */
 		gain = nearest_gain(dev, gain);
 		verbose_gain_set(dev, gain);
-	}
-
-	if (rtlOpts) {
-		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	verbose_ppm_set(dev, ppm_error);
@@ -310,6 +318,10 @@ int main(int argc, char **argv)
 		if (writeWav) {
 			waveWriteHeader(&waveWrState, samp_rate, frequency, 8, 2, file);
 		}
+	}
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */

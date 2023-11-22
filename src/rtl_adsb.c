@@ -56,6 +56,7 @@
 #endif
 
 #define ADSB_RATE			2000000
+#define ADSB_BW				3000000
 #define ADSB_FREQ			1090000000
 #define DEFAULT_ASYNC_BUF_NUMBER	12
 #define DEFAULT_BUF_LENGTH		(16 * 16384)
@@ -383,6 +384,7 @@ int main(int argc, char **argv)
 	const char * rtlOpts = NULL;
 	int r, opt;
 	int gain = AUTO_GAIN; /* tenths of a dB */
+	uint32_t bandwidth = 0;
 	int dev_index = 0;
 	int dev_given = 0;
 	int ppm_error = 0;
@@ -391,7 +393,7 @@ int main(int argc, char **argv)
 	pthread_mutex_init(&ready_m, NULL);
 	squares_precompute();
 
-	while ((opt = getopt(argc, argv, "d:g:p:e:O:Q:VSTv")) != -1)
+	while ((opt = getopt(argc, argv, "d:g:w:p:e:O:Q:VSTv")) != -1)
 	{
 		switch (opt) {
 		case 'd':
@@ -403,6 +405,9 @@ int main(int argc, char **argv)
 			break;
 		case 'g':
 			gain = (int)(atof(optarg) * 10);
+			break;
+		case 'w':
+			bandwidth = (uint32_t)atofs(optarg);
 			break;
 		case 'p':
 			ppm_error = atoi(optarg);
@@ -491,16 +496,18 @@ int main(int argc, char **argv)
 	if (enable_biastee)
 		fprintf(stderr, "activated bias-T on GPIO PIN 0\n");
 
-	/* set - especially sideband - before testing tuning range */
-	if (rtlOpts) {
-		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
-	}
-
 	/* Set the tuner frequency */
 	verbose_set_frequency(dev, ADSB_FREQ);
 
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, ADSB_RATE);
+
+	/* Set the tuner bandwidth */
+	verbose_set_bandwidth(dev, bandwidth);
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
+	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */
 	verbose_reset_buffer(dev);
