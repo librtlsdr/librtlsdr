@@ -85,6 +85,7 @@ struct demod_thread_state
 	pthread_mutex_t	ready_m;
 	struct output_state	*output_target;
 
+	struct mixer_state mixer;
 	struct demod_state demod;
 };
 
@@ -298,6 +299,8 @@ static void *demod_thread_fn(void *arg)
 	while (!do_exit) {
 		safe_cond_wait(&dt->ready, &dt->ready_m);
 		pthread_rwlock_wrlock(&dt->rw);
+		/* todo: apply mixer per channel */
+		mixer_apply(&dt->mixer, d->lp_len, d->lowpassed, d->lowpassed);
 		full_demod(dt);
 		pthread_rwlock_unlock(&dt->rw);
 
@@ -386,6 +389,11 @@ static void *controller_fn(void *arg)
 		fprintf(stderr, "verbose_set_frequency(%f MHz)\n", dongle.freq * 1E-6);
 	}
 	verbose_set_frequency(dongle.dev, dongle.freq);
+
+	for (i = 0; i < s->freq_len; ++i) {
+		mixer_init(&dm_thr.mixer, s->freqs[i], dongle.rate);
+	}
+
 	fprintf(stderr, "Oversampling input by: %ix.\n", demod->downsample);
 	fprintf(stderr, "Buffer size: %0.2fms\n",
 		1000 * 0.5 * (float)ACTUAL_BUF_LENGTH / (float)dongle.rate);
