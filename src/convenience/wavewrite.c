@@ -36,12 +36,6 @@
 
 #include <math.h>
 
-#include "wavehdr.h"
-
-static waveFileHeader waveHdr;
-
-static uint32_t	waveDataSize = 0;
-int	waveHdrStarted = 0;
 
 #ifdef _WIN32
 int gettimeofday(struct timeval *tv, void* ignored)
@@ -104,64 +98,71 @@ static void waveSetStartTimeInt(time_t tim, double fraction, Wind_SystemTime *p)
 		p->wMilliseconds = 999;
 }
 
-void waveSetStartTime(time_t tim, double fraction)
+void waveSetStartTime(WaveWriteState *state, time_t tim, double fraction)
 {
-	waveSetStartTimeInt(tim, fraction, &waveHdr.a.StartTime );
-	waveHdr.a.StopTime = waveHdr.a.StartTime;		/* to fix */
+	waveSetStartTimeInt(tim, fraction, &state->waveHdr.a.StartTime );
+	state->waveHdr.a.StopTime = state->waveHdr.a.StartTime;		/* to fix */
 }
 
 
-void wavePrepareHeader(unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels)
+void wavePrepareHeader(WaveWriteState *state, unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels)
 {
 	int	bytesPerSample = bitsPerSample / 8;
 	int bytesPerFrame = bytesPerSample * numChannels;
 
-	memcpy( waveHdr.r.hdr.ID, "RIFF", 4 );
-	waveHdr.r.hdr.size = sizeof(waveFileHeader) - 8;		/* to fix */
-	memcpy( waveHdr.r.waveID, "WAVE", 4 );
+	memcpy( state->waveHdr.r.hdr.ID, "RIFF", 4 );
+	state->waveHdr.r.hdr.size = sizeof(waveFileHeader) - 8;		/* to fix */
+	memcpy( state->waveHdr.r.waveID, "WAVE", 4 );
 
-	memcpy( waveHdr.f.hdr.ID, "fmt ", 4 );
-	waveHdr.f.hdr.size = 16;
-	waveHdr.f.wFormatTag = 1;					/* PCM */
-	waveHdr.f.nChannels = numChannels;		/* I and Q channels */
-	waveHdr.f.nSamplesPerSec = samplerate;
-	waveHdr.f.nAvgBytesPerSec = samplerate * bytesPerFrame;
-	waveHdr.f.nBlockAlign = waveHdr.f.nChannels;
-	waveHdr.f.nBitsPerSample = bitsPerSample;
+	memcpy( state->waveHdr.f.hdr.ID, "fmt ", 4 );
+	state->waveHdr.f.hdr.size = 16;
+	state->waveHdr.f.wFormatTag = 1;					/* PCM */
+	state->waveHdr.f.nChannels = numChannels;		/* I and Q channels */
+	state->waveHdr.f.nSamplesPerSec = samplerate;
+	state->waveHdr.f.nAvgBytesPerSec = samplerate * bytesPerFrame;
+	state->waveHdr.f.nBlockAlign = state->waveHdr.f.nChannels;
+	state->waveHdr.f.nBitsPerSample = bitsPerSample;
 
-	memcpy( waveHdr.a.hdr.ID, "auxi", 4 );
-	waveHdr.a.hdr.size = 2 * sizeof(Wind_SystemTime) + 9 * sizeof(int32_t);  /* = 2 * 16 + 9 * 4 = 68 */
-	waveSetCurrTime( &waveHdr.a.StartTime );
-	waveHdr.a.StopTime = waveHdr.a.StartTime;		/* to fix */
-	waveHdr.a.centerFreq = freq;
-	waveHdr.a.ADsamplerate = samplerate;
-	waveHdr.a.IFFrequency = 0;
-	waveHdr.a.Bandwidth = 0;
-	waveHdr.a.IQOffset = 0;
-	waveHdr.a.Unused2 = 0;
-	waveHdr.a.Unused3 = 0;
-	waveHdr.a.Unused4 = 0;
-	waveHdr.a.Unused5 = 0;
+	memcpy( state->waveHdr.a.hdr.ID, "auxi", 4 );
+	state->waveHdr.a.hdr.size = 2 * sizeof(Wind_SystemTime) + 9 * sizeof(int32_t);  /* = 2 * 16 + 9 * 4 = 68 */
+	waveSetCurrTime( &state->waveHdr.a.StartTime );
+	state->waveHdr.a.StopTime = state->waveHdr.a.StartTime;		/* to fix */
+	state->waveHdr.a.centerFreq = freq;
+	state->waveHdr.a.ADsamplerate = samplerate;
+	state->waveHdr.a.IFFrequency = 0;
+	state->waveHdr.a.Bandwidth = 0;
+	state->waveHdr.a.IQOffset = 0;
+	state->waveHdr.a.Unused2 = 0;
+	state->waveHdr.a.Unused3 = 0;
+	state->waveHdr.a.Unused4 = 0;
+	state->waveHdr.a.Unused5 = 0;
 
-	memcpy( waveHdr.d.hdr.ID, "data", 4 );
-	waveHdr.d.hdr.size = 0;		/* to fix later */
-	waveDataSize = 0;
+	memcpy( state->waveHdr.d.hdr.ID, "data", 4 );
+	state->waveHdr.d.hdr.size = 0;		/* to fix later */
+	state->waveDataSize = 0;
 }
 
-void waveWriteHeader(unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels, FILE * f)
+
+void initWaveWriteState(WaveWriteState * state)
+{
+	state->waveHdrStarted = 0;
+	state->waveDataSize = 0;
+}
+
+void waveWriteHeader(WaveWriteState *state, unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels, FILE * f)
 {
 	if (f != stdout) {
-		assert( !waveHdrStarted );
-		wavePrepareHeader(samplerate, freq, bitsPerSample, numChannels);
-		fwrite(&waveHdr, sizeof(waveFileHeader), 1, f);
-		waveHdrStarted = 1;
+		assert( !state->waveHdrStarted );
+		wavePrepareHeader(state, samplerate, freq, bitsPerSample, numChannels);
+		fwrite(&state->waveHdr, sizeof(waveFileHeader), 1, f);
+		state->waveHdrStarted = 1;
 	}
 }
 
-int  waveWriteSamples(FILE* f,  void * vpData, size_t numSamples, int needCleanData)
+int  waveWriteSamples(WaveWriteState *state, FILE* f,  const void * vpData, size_t numSamples, int needCleanData)
 {
 	size_t nw;
-	switch (waveHdr.f.nBitsPerSample)
+	switch (state->waveHdr.f.nBitsPerSample)
 	{
 	case 0:
 	default:
@@ -169,12 +170,12 @@ int  waveWriteSamples(FILE* f,  void * vpData, size_t numSamples, int needCleanD
 	case 8:
 		/* no endian conversion needed for single bytes */
 		nw = fwrite(vpData, sizeof(uint8_t), numSamples, f);
-		waveDataSize += sizeof(uint8_t) * numSamples;
+		state->waveDataSize += sizeof(uint8_t) * numSamples;
 		return (nw == numSamples) ? 0 : 1;
 	case 16:
 		/* TODO: endian conversion needed */
 		nw = fwrite(vpData, sizeof(int16_t), numSamples, f);
-		waveDataSize += sizeof(int16_t) * numSamples;
+		state->waveDataSize += sizeof(int16_t) * numSamples;
 		if ( needCleanData )
 		{
 			/* TODO: convert back endianness */
@@ -183,23 +184,23 @@ int  waveWriteSamples(FILE* f,  void * vpData, size_t numSamples, int needCleanD
 	}
 }
 
-int  waveWriteFrames(FILE* f,  void * vpData, size_t numFrames, int needCleanData)
+int  waveWriteFrames(WaveWriteState *state, FILE* f,  const void * vpData, size_t numFrames, int needCleanData)
 {
 	size_t nw;
-	switch (waveHdr.f.nBitsPerSample)
+	switch (state->waveHdr.f.nBitsPerSample)
 	{
 	case 0:
 	default:
 		return 1;
 	case 8:
 		/* no endian conversion needed for single bytes */
-		nw = fwrite(vpData, waveHdr.f.nChannels * sizeof(uint8_t), numFrames, f);
-		waveDataSize += waveHdr.f.nChannels * sizeof(uint8_t) * numFrames;
+		nw = fwrite(vpData, state->waveHdr.f.nChannels * sizeof(uint8_t), numFrames, f);
+		state->waveDataSize += state->waveHdr.f.nChannels * sizeof(uint8_t) * numFrames;
 		return (nw == numFrames) ? 0 : 1;
 	case 16:
 		/* TODO: endian conversion needed */
-		nw = fwrite(vpData, waveHdr.f.nChannels * sizeof(int16_t), numFrames, f);
-		waveDataSize += waveHdr.f.nChannels * sizeof(int16_t) * numFrames;
+		nw = fwrite(vpData, state->waveHdr.f.nChannels * sizeof(int16_t), numFrames, f);
+		state->waveDataSize += state->waveHdr.f.nChannels * sizeof(int16_t) * numFrames;
 		if ( needCleanData )
 		{
 			/* TODO: convert back endianness */
@@ -209,18 +210,18 @@ int  waveWriteFrames(FILE* f,  void * vpData, size_t numFrames, int needCleanDat
 }
 
 
-int  waveFinalizeHeader(FILE * f)
+int  waveFinalizeHeader(WaveWriteState *state, FILE * f)
 {
 	if (f != stdout) {
-		assert( waveHdrStarted );
-		waveSetCurrTime( &waveHdr.a.StopTime );
-		waveHdr.d.hdr.size = waveDataSize;
-		waveHdr.r.hdr.size += waveDataSize;
+		assert( state->waveHdrStarted );
+		waveSetCurrTime( &state->waveHdr.a.StopTime );
+		state->waveHdr.d.hdr.size = state->waveDataSize;
+		state->waveHdr.r.hdr.size += state->waveDataSize;
 		/* fprintf(stderr, "waveFinalizeHeader(): datasize = %d\n", waveHdr.dataSize); */
-		waveHdrStarted = 0;
+		state->waveHdrStarted = 0;
 		if ( fseek(f, 0, SEEK_SET) )
 			return 1;
-		if ( 1 != fwrite(&waveHdr, sizeof(waveFileHeader), 1, f) )
+		if ( 1 != fwrite(&state->waveHdr, sizeof(waveFileHeader), 1, f) )
 			return 1;
 		/* fprintf(stderr, "waveFinalizeHeader(): success writing header\n"); */
 		return 0;

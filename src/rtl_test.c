@@ -92,7 +92,7 @@ static uint32_t dropped_samples = 0;
 
 static unsigned int ppm_duration = PPM_DURATION;
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_test, a benchmark tool for RTL2832 based SDR-receivers\n"
@@ -114,7 +114,7 @@ void usage(void)
 #endif
 		"\t[-b output_block_size (default: 16 * 16384)]\n"
 		"\t[-S force sync output (default: async)]\n"
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -512,26 +512,25 @@ int main(int argc, char **argv)
 	uint8_t *buffer;
 	int dev_index = 0;
 	int dev_given = 0;
+	int verbosity = 0;
 	uint32_t out_block_size = DEFAULT_BUF_LENGTH;
 	uint32_t tuner_bench_beg_freq = 0;
 	uint32_t tuner_bench_end_freq = 0;
-	int count;
-	int gains[100];
 
-	while ((opt = getopt(argc, argv, "d:s:b:O:tf:e:p::Sh")) != -1) {
+	while ((opt = getopt(argc, argv, "d:s:b:O:tf:e:p::Svh")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = verbose_device_search(optarg);
 			dev_given = 1;
+			break;
+		case 'O':
+			rtlOpts = optarg;
 			break;
 		case 's':
 			samp_rate = (uint32_t)atofs(optarg);
 			break;
 		case 'b':
 			out_block_size = (uint32_t)atof(optarg);
-			break;
-		case 'O':
-			rtlOpts = optarg;
 			break;
 		case 't':
 			test_mode = TUNER_BENCHMARK;
@@ -550,9 +549,12 @@ int main(int argc, char **argv)
 		case 'S':
 			sync_mode = 1;
 			break;
+		case 'v':
+			++verbosity;
+			break;
 		case 'h':
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
@@ -594,20 +596,16 @@ int main(int argc, char **argv)
 #else
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #endif
-	count = rtlsdr_get_tuner_gains(dev, NULL);
-	fprintf(stderr, "Supported gain values (%d): ", count);
 
-	count = rtlsdr_get_tuner_gains(dev, gains);
-	for (i = 0; i < count; i++)
-		fprintf(stderr, "%.1f ", gains[i] / 10.0);
-	fprintf(stderr, "\n");
+	verbose_list_gains(dev, 0);
+	verbose_list_bandwidths(dev);
 
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, samp_rate);
 
 	/* set - especially sideband - before testing tuning range */
 	if (rtlOpts) {
-		rtlsdr_set_opt_string(dev, rtlOpts, 1);
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	if (test_mode == TUNER_BENCHMARK) {

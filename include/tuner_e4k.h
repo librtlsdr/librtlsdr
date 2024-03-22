@@ -208,7 +208,7 @@ int e4k_tune_params(struct e4k_state *e4k, struct e4k_pll_params *p);
 uint32_t e4k_compute_pll_params(struct e4k_pll_params *oscp, uint32_t fosc, uint32_t intended_flo);
 int e4k_if_filter_bw_get(struct e4k_state *e4k, enum e4k_if_filter filter);
 int e4k_if_filter_bw_set(struct e4k_state *e4k, enum e4k_if_filter filter,
-		         uint32_t bandwidth);
+		         uint32_t bandwidth, int apply, uint32_t *applied_bw);
 int e4k_if_filter_chan_enable(struct e4k_state *e4k, int on);
 int e4k_rf_filter_set(struct e4k_state *e4k);
 

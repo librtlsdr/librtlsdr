@@ -21,11 +21,19 @@
 #include <stdio.h>
 #include <time.h>
 
+#include "wavehdr.h"
+
+typedef struct
+{
+	waveFileHeader	waveHdr;
+	uint32_t	waveDataSize;
+	int		waveHdrStarted;
+} WaveWriteState;
+
+
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-extern int	waveHdrStarted;
 
 /*!
  * helper functions to write and finalize wave headers
@@ -37,16 +45,18 @@ extern int	waveHdrStarted;
  * 
  */
 
-void waveWriteHeader(unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels, FILE * f);
+void initWaveWriteState(WaveWriteState * state);
+
+void waveWriteHeader(WaveWriteState *state, unsigned samplerate, unsigned freq, int bitsPerSample, int numChannels, FILE * f);
 
 /* waveWriteFrames() writes (numFrames * numChannels) samples
  * waveWriteSamples()
  * both return 0, when no errors occured
  */
-int  waveWriteFrames(FILE* f,  void * vpData, size_t numFrames, int needCleanData);
-int  waveWriteSamples(FILE* f,  void * vpData, size_t numSamples, int needCleanData);  /* returns 0, when no errors occured */
-void waveSetStartTime(time_t t, double fraction);
-int  waveFinalizeHeader(FILE * f);      /* returns 0, when no errors occured */
+int  waveWriteFrames(WaveWriteState *state, FILE* f,  const void * vpData, size_t numFrames, int needCleanData);
+int  waveWriteSamples(WaveWriteState *state, FILE* f,  const void * vpData, size_t numSamples, int needCleanData);  /* returns 0, when no errors occured */
+void waveSetStartTime(WaveWriteState *state, time_t t, double fraction);
+int  waveFinalizeHeader(WaveWriteState *state, FILE * f);      /* returns 0, when no errors occured */
 
 #ifdef __cplusplus
 }

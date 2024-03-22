@@ -37,6 +37,14 @@ extern "C" {
 int nearest_gain(rtlsdr_dev_t *dev, int target_gain);
 
 /*!
+ * List supported gain values
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ * \param tenth_db  print in tenth dB (integer) if != 0, else in dB
+ */
+void verbose_list_gains(rtlsdr_dev_t *dev, int tenth_db);
+
+/*!
  * Set device frequency and report status on stderr
  *
  * \param dev the device handle given by rtlsdr_open()
@@ -66,6 +74,12 @@ int verbose_set_sample_rate(rtlsdr_dev_t *dev, uint32_t samp_rate);
 
 int verbose_set_bandwidth(rtlsdr_dev_t *dev, uint32_t bandwidth);
 
+/*!
+ * List supported bandwidth values
+ *
+ * \param dev the device handle given by rtlsdr_open()
+ */
+void verbose_list_bandwidths(rtlsdr_dev_t *dev);
 
 /*!
  * Enable or disable the direct sampling mode and report status on stderr

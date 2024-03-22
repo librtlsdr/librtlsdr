@@ -49,7 +49,7 @@ OPTION(WITH_RPC "RPC for non-Windows" OFF)
 
 # Set the version information here
 set(VERSION_INFO_MAJOR_VERSION 0) # increment major on api compatibility changes
-set(VERSION_INFO_MINOR_VERSION 9) # increment minor on feature-level changes
+set(VERSION_INFO_MINOR_VERSION 10) # increment minor on feature-level changes
 set(VERSION_INFO_PATCH_VERSION git) # increment patch for bug fixes and docs
 include(Version) # setup version info
 
@@ -172,7 +172,19 @@ if (INSTALL_UDEV_RULES)
         )
 else (INSTALL_UDEV_RULES)
     message (STATUS "Udev rules not being installed, install them with -DINSTALL_UDEV_RULES=ON")
+    message (STATUS "  or use 'cmake --build . --target udev_rules'  with root privileges")
 endif (INSTALL_UDEV_RULES)
+
+# allow running only this target with root privileges - without full build
+add_custom_target(udev_rules
+    COMMENT "install udev rules into /etc/udev/rules.d/"
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/rtl-sdr.rules /etc/udev/rules.d/rtl-sdr.rules
+)
+
+add_custom_target(blacklist
+    COMMENT "install module blacklist into /etc/modprobe.d/"
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/rtlsdr-blacklist.conf /etc/modprobe.d/blacklist_rtlsdr.conf
+)
 
 option(DETACH_KERNEL_DRIVER "Detach kernel driver if loaded" OFF)
 if (DETACH_KERNEL_DRIVER)

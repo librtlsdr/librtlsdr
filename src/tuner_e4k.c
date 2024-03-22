@@ -277,23 +277,29 @@ static const struct reg_field if_filter_fields[] = {
 	}
 };
 
-static int find_if_bw(enum e4k_if_filter filter, uint32_t bw)
+static int find_if_bw(enum e4k_if_filter filter, uint32_t bw, uint32_t *applied_bw)
 {
+	int idx;
 	if (filter >= ARRAY_SIZE(if_filter_bw))
 		return -EINVAL;
 
-	return closest_arr_idx(if_filter_bw[filter],
+	idx = closest_arr_idx(if_filter_bw[filter],
 			       if_filter_bw_len[filter], bw);
+	if (applied_bw)
+		*applied_bw = if_filter_bw[filter][idx];
+	return idx;
 }
 
 /*! \brief Set the filter band-width of any of the IF filters
  *  \param[in] e4k reference to the tuner chip
  *  \param[in] filter filter to be configured
  *  \param[in] bandwidth bandwidth to be configured
+ *  \param[in] apply flag (0/1), if bandwidth should be applied - or just get applied_bw
+ *  \param[out] effectıvely configured bandwidth
  *  \returns positive actual filter band-width, negative in case of error
  */
 int e4k_if_filter_bw_set(struct e4k_state *e4k, enum e4k_if_filter filter,
-		         uint32_t bandwidth)
+		         uint32_t bandwidth, int apply, uint32_t *applied_bw)
 {
 	int bw_idx;
 	const struct reg_field *field;
@@ -301,7 +307,10 @@ int e4k_if_filter_bw_set(struct e4k_state *e4k, enum e4k_if_filter filter,
 	if (filter >= ARRAY_SIZE(if_filter_bw))
 		return -EINVAL;
 
-	bw_idx = find_if_bw(filter, bandwidth);
+	bw_idx = find_if_bw(filter, bandwidth, applied_bw);
+
+	if (!apply)
+		return 0;
 
 	field = &if_filter_fields[filter];
 
@@ -991,9 +1000,9 @@ int e4k_init(struct e4k_state *e4k)
 	e4k_if_gain_set(e4k, 6, 9);
 
 	/* Set the most narrow filter we can possibly use */
-	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_MIX, KHZ(1900));
-	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_RC, KHZ(1000));
-	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_CHAN, KHZ(2150));
+	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_MIX, KHZ(1900), 1, NULL);
+	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_RC, KHZ(1000), 1, NULL);
+	e4k_if_filter_bw_set(e4k, E4K_IF_FILTER_CHAN, KHZ(2150), 1, NULL);
 	e4k_if_filter_chan_enable(e4k, 1);
 
 	/* Disable time variant DC correction and LUT */

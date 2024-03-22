@@ -21,6 +21,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #ifndef _WIN32
 #include <unistd.h>
@@ -47,8 +48,10 @@
 static int do_exit = 0;
 static uint32_t iq_frames_to_read = 0;
 static rtlsdr_dev_t *dev = NULL;
+static WaveWriteState waveWrState;
 
-void usage(void)
+
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_sdr, an I/Q recorder for RTL2832 based SDR-receivers\n"
@@ -62,16 +65,16 @@ void usage(void)
 		"\t[-s samplerate (default: 2048000 Hz)]\n"
 		"\t[-w tuner_bandwidth (default: automatic)]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
+		"%s"
 		"\t[-g gain (default: 0 for auto)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
-		"%s"
 		"\t[-b output_block_size (default: 16 * 16384)]\n"
 		"\t[-n number of samples to read (default: 0, infinite)]\n"
 		"\t[-S force sync output (default: async)]\n"
 		"\t[-N no dithering (default: use dithering)]\n"
 		"\t[-H write wave Header to file (default: off)]\n"
 		"\tfilename (a '-' dumps samples to stdout)\n\n"
-		, rtlsdr_get_opt_help(1) );
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -109,7 +112,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 			rtlsdr_cancel_async(dev);
 		}
 
-		if (!waveHdrStarted) {
+		if (!waveWrState.waveHdrStarted) {
 			size_t wr = fwrite(buf, 1, len, (FILE*)ctx);
 			if ( wr != len) {
 				fprintf(stderr, "Short write (wrote %ld of %ld bytes), samples lost, exiting!\n"
@@ -117,7 +120,7 @@ static void rtlsdr_callback(unsigned char *buf, uint32_t len, void *ctx)
 				rtlsdr_cancel_async(dev);
 			}
 		} else {
-			if ( waveWriteFrames((FILE*)ctx, buf, len/2, 0) ) {
+			if ( waveWriteFrames(&waveWrState, (FILE*)ctx, buf, len/2, 0) ) {
 				fprintf(stderr, "Short write, samples lost, exiting!\n");
 				rtlsdr_cancel_async(dev);
 			}
@@ -159,6 +162,8 @@ int main(int argc, char **argv)
 	uint32_t out_block_size = DEFAULT_BUF_LENGTH;
 	int verbosity = 0;
 
+	initWaveWriteState(&waveWrState);
+
 	while ((opt = getopt(argc, argv, "d:f:g:s:w:b:n:p:O:SNHv")) != -1) {
 		switch (opt) {
 		case 'd':
@@ -187,8 +192,16 @@ int main(int argc, char **argv)
 			out_block_size = (uint32_t)atof(optarg);
 			break;
 		case 'n':
-			iq_frames_to_read = (uint32_t)atof(optarg);
+		{
+			double tmp_arg = atofs(optarg);
+			if (tmp_arg > UINT32_MAX) {
+				iq_frames_to_read = UINT32_MAX;
+				fprintf(stderr, "limited number of samples to record\n");
+			}
+			else
+				iq_frames_to_read = (uint32_t)tmp_arg;
 			break;
+		}
 		case 'S':
 			sync_mode = 1;
 			break;
@@ -202,13 +215,13 @@ int main(int argc, char **argv)
 			++verbosity;
 			break;
 		default:
-			usage();
+			usage(verbosity);
 			break;
 		}
 	}
 
 	if (argc <= optind) {
-		usage();
+		usage(verbosity);
 	} else {
 		filename = argv[optind];
 	}
@@ -264,11 +277,14 @@ int main(int argc, char **argv)
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, samp_rate);
 
+	/* Set the frequency */
+	verbose_set_frequency(dev, frequency);
+
 	/* Set the tuner bandwidth */
 	verbose_set_bandwidth(dev, bandwidth);
 
-	/* Set the frequency */
-	verbose_set_frequency(dev, frequency);
+	if (verbosity && bandwidth)
+		verbose_list_bandwidths(dev);
 
 	if (0 == gain) {
 		 /* Enable automatic gain */
@@ -277,10 +293,6 @@ int main(int argc, char **argv)
 		/* Enable manual gain */
 		gain = nearest_gain(dev, gain);
 		verbose_gain_set(dev, gain);
-	}
-
-	if (rtlOpts) {
-		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	verbose_ppm_set(dev, ppm_error);
@@ -304,8 +316,12 @@ int main(int argc, char **argv)
 			goto out;
 		}
 		if (writeWav) {
-			waveWriteHeader(samp_rate, frequency, 8, 2, file);
+			waveWriteHeader(&waveWrState, samp_rate, frequency, 8, 2, file);
 		}
+	}
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
 	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */
@@ -325,7 +341,7 @@ int main(int argc, char **argv)
 				do_exit = 1;
 			}
 
-			if (!waveHdrStarted) {
+			if (!waveWrState.waveHdrStarted) {
 				size_t wr = fwrite(buffer, 1, n_read, file);
 				if (wr != (size_t)n_read) {
 					fprintf(stderr, "Short write (wrote %ld of %ld bytes), samples lost, exiting!\n"
@@ -333,7 +349,7 @@ int main(int argc, char **argv)
 					break;
 				}
 			} else {
-				if ( waveWriteSamples(file, buffer, n_read/2, 0) ) {
+				if ( waveWriteSamples(&waveWrState, file, buffer, n_read/2, 0) ) {
 					fprintf(stderr, "Short write, samples lost, exiting!\n");
 					break;
 				}
@@ -359,7 +375,7 @@ int main(int argc, char **argv)
 
 	if (file != stdout) {
 		if (writeWav) {
-			waveFinalizeHeader(file);
+			waveFinalizeHeader(&waveWrState, file);
 			fclose(file);
 			remove(filename);	/* delete, in case file already exists */
 			r = rename( tempfilename, filename );	/* #include <stdio.h> */

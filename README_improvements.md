@@ -68,24 +68,18 @@ against librtlsdr's development branch (initially same date, but updated 2020-10
     * **tp=** set pin for bias tee
     * **ds=** set direct sampling (HF mode) for RTL-SDR V3 or compatible, see https://www.rtl-sdr.com/rtl-sdr-blog-v-3-dongles-user-guide/
     * **dm=** set direct sampling mode
+    * **inc=** set impulse noise cancellation (default is on), might be useful to deactivate for ADS-B
 
   * many of the options are R820T/2-tuner specific:
 
     * **bc=** set the the reception bands' center in Hz
-
     * **sb=** set tuner sideband
-
     * **ifm=** set IF mode (AGC, fixed gain, ..) for VGA (variable gain amplifier)
-
     * **harm=** set n-th harmonic reception
-
     * **vcocmin=** set minimum VCO current
-
     * **vcocmax=** set maximum VCO current
-
     * **vcoalgo=** set VCO algorithm
 
-      
 
 * probably some more: it's highly probable, that this list is incomplete
 
@@ -114,6 +108,8 @@ new alternative: environment variable **LIBRTLSDR_OPT**
 * added rtlsdr_set_center_freq64(), to set frequencies above ~4.29 GHz, the 32-bit limit
 * added rtlsdr_get_center_freq64()
 * added rtlsdr_set_harmonic_rx() to activate/change harmonic reception
+* added rtlsdr_set_impulse_nc(), rtlsdr_get_impulse_nc()
+* added rtlsdr_set_aagc(), rtlsdr_set_aagc_gain_distrib() and getters
 
 
 ## Added Tools

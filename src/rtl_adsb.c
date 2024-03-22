@@ -56,6 +56,7 @@
 #endif
 
 #define ADSB_RATE			2000000
+#define ADSB_BW				3000000
 #define ADSB_FREQ			1090000000
 #define DEFAULT_ASYNC_BUF_NUMBER	12
 #define DEFAULT_BUF_LENGTH		(16 * 16384)
@@ -75,7 +76,7 @@ uint16_t squares[256];
 
 /* todo, bundle these up in a struct */
 uint8_t *buffer;  /* also abused for uint16_t */
-int verbose_output = 0;
+int verbosity = 0;
 int short_output = 0;
 int quality = 10;
 int allowed_errors = 5;
@@ -89,7 +90,7 @@ int adsb_frame[14];
 #define safe_cond_signal(n, m) pthread_mutex_lock(m); pthread_cond_signal(n); pthread_mutex_unlock(m)
 #define safe_cond_wait(n, m) pthread_mutex_lock(m); pthread_cond_wait(n, m); pthread_mutex_unlock(m)
 
-void usage(void)
+void usage(int verbosity)
 {
 	fprintf(stderr,
 		"rtl_adsb, a simple ADS-B decoder\n"
@@ -101,6 +102,7 @@ void usage(void)
 	fprintf(stderr,
 		"Usage:\trtl_adsb [-R] [-g gain] [-p ppm] [output file]\n"
 		"\t[-d device_index or serial (default: 0)]\n"
+		"%s"
 		"\t[-V verbove output (default: off)]\n"
 		"\t[-S show short frames (default: off)]\n"
 		"\t[-Q quality (0: no sanity checks, 0.5: half bit, 1: one bit (default), 2: two bits)]\n"
@@ -115,7 +117,8 @@ void usage(void)
 		"\twhile true; do rtl_adsb | nc -lp 8080; done\n"
 		"Streaming with socat:\n"
 		"\trtl_adsb | socat -u - TCP4:sdrsharp.com:47806\n"
-		"\n");
+		"\n"
+		, rtlsdr_get_opt_help(verbosity) );
 	exit(1);
 }
 
@@ -152,7 +155,7 @@ void display(int *frame, int len)
 	for (i=0; i<((len+7)/8); i++) {
 		fprintf(file, "%02x", frame[i]);}
 	fprintf(file, ";\r\n");
-	if (!verbose_output) {
+	if (!verbosity) {
 		return;}
 	fprintf(file, "DF=%i CA=%i\n", df, frame[0] & 0x07);
 	fprintf(file, "ICAO Address=%06x\n", frame[1] << 16 | frame[2] << 8 | frame[3]);
@@ -378,8 +381,10 @@ int main(int argc, char **argv)
 	struct sigaction sigact;
 #endif
 	char *filename = NULL;
+	const char * rtlOpts = NULL;
 	int r, opt;
 	int gain = AUTO_GAIN; /* tenths of a dB */
+	uint32_t bandwidth = 0;
 	int dev_index = 0;
 	int dev_given = 0;
 	int ppm_error = 0;
@@ -388,21 +393,24 @@ int main(int argc, char **argv)
 	pthread_mutex_init(&ready_m, NULL);
 	squares_precompute();
 
-	while ((opt = getopt(argc, argv, "d:g:p:e:Q:VST")) != -1)
+	while ((opt = getopt(argc, argv, "d:g:w:p:e:O:Q:VSTv")) != -1)
 	{
 		switch (opt) {
 		case 'd':
 			dev_index = verbose_device_search(optarg);
 			dev_given = 1;
 			break;
+		case 'O':
+			rtlOpts = optarg;
+			break;
 		case 'g':
 			gain = (int)(atof(optarg) * 10);
 			break;
+		case 'w':
+			bandwidth = (uint32_t)atofs(optarg);
+			break;
 		case 'p':
 			ppm_error = atoi(optarg);
-			break;
-		case 'V':
-			verbose_output = 1;
 			break;
 		case 'S':
 			short_output = 1;
@@ -416,8 +424,12 @@ int main(int argc, char **argv)
 		case 'T':
 			enable_biastee = 1;
 			break;
+		case 'V':
+		case 'v':
+			++verbosity;
+			break;
 		default:
-			usage();
+			usage(verbosity);
 			return 0;
 		}
 	}
@@ -480,15 +492,22 @@ int main(int argc, char **argv)
 	verbose_ppm_set(dev, ppm_error);
 	r = rtlsdr_set_agc_mode(dev, 1);
 
+	rtlsdr_set_bias_tee(dev, enable_biastee);
+	if (enable_biastee)
+		fprintf(stderr, "activated bias-T on GPIO PIN 0\n");
+
 	/* Set the tuner frequency */
 	verbose_set_frequency(dev, ADSB_FREQ);
 
 	/* Set the sample rate */
 	verbose_set_sample_rate(dev, ADSB_RATE);
 
-	rtlsdr_set_bias_tee(dev, enable_biastee);
-	if (enable_biastee)
-		fprintf(stderr, "activated bias-T on GPIO PIN 0\n");
+	/* Set the tuner bandwidth */
+	verbose_set_bandwidth(dev, bandwidth);
+
+	if (rtlOpts) {
+		rtlsdr_set_opt_string(dev, rtlOpts, verbosity);
+	}
 
 	/* Reset endpoint before we start reading from it (mandatory) */
 	verbose_reset_buffer(dev);

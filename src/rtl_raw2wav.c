@@ -111,6 +111,9 @@ int main(int argc, char **argv)
 	time_t tim = 0;
 	double fraction = 0.0;
 	int haveTime = 0;
+	WaveWriteState waveWrState;
+
+	initWaveWriteState(&waveWrState);
 
 	while ((opt = getopt(argc, argv, "f:s:c:b:r:u:t:w:vh")) != -1) {
 		switch (opt) {
@@ -271,11 +274,11 @@ int main(int argc, char **argv)
 	} else {
 		if (verbosity)
 			fprintf(stderr, "Opened '%s' for output\n", tempfilename);
-		waveWriteHeader(srate, freq, nBits, nChan, outfile);
+		waveWriteHeader(&waveWrState, srate, freq, nBits, nChan, outfile);
 		if (haveTime) {
 			if (verbosity >= 2)
 				fprintf(stderr, "Setting start time of output file\n");
-			waveSetStartTime(tim, fraction);
+			waveSetStartTime(&waveWrState, tim, fraction);
 		}
 	}
 
@@ -286,14 +289,14 @@ int main(int argc, char **argv)
 		}
 		nRead = fread(acBuf, smpSize, 65536, inpfile);
 		if (nRead > 0)
-			waveWriteFrames(outfile, acBuf, nRead, 0);
+			waveWriteFrames(&waveWrState, outfile, acBuf, nRead, 0);
 		if (verbosity >= 2)
 			fprintf(stderr, ".");
 	}
 
 	if (verbosity >= 2)
 		fprintf(stderr, "\nWriting output header\n");
-	waveFinalizeHeader(outfile);
+	waveFinalizeHeader(&waveWrState, outfile);
 	fclose(outfile);
 	if (verbosity)
 		fprintf(stderr, "Closed output file.\n");
