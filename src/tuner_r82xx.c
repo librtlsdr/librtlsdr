@@ -1555,7 +1555,7 @@ int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control
 	if(is_rtlsdr_blog_v4)
 	{
                 /* set fixed VGA gain based on frequency */
-                if (priv->rf_freq > MHZ(1500)) {
+                if (priv->rf_freq > MHZ(1350)) {
                         rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
                 }
                 else if (priv->rf_freq > MHZ(1000)) {
@@ -1567,7 +1567,7 @@ int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control
 	}
 	else
 	{
-                if (priv->rf_freq > MHZ(1500)) {
+                if (priv->rf_freq > MHZ(1350)) {
                         rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
                 }
 		else {
