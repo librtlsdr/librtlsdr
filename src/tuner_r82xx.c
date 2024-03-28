@@ -326,7 +326,7 @@ R0...R4 read, R5...R15 read/write, R16..R31 write
 /* Those initial values start from REG_SHADOW_START */
 static const uint8_t r82xx_init_array[] = {
 	0x80,	/* Reg 0x05 */
-	0x13,	/* Reg 0x06 */
+	0x33,	/* Reg 0x06 */
 	0x70,	/* Reg 0x07 */
 
 	0xc0,	/* Reg 0x08 */
@@ -1554,11 +1554,25 @@ int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control
 	is_rtlsdr_blog_v4 = rtlsdr_check_dongle_model(priv->rtl_dev, "RTLSDRBlog", "Blog V4");
 	if(is_rtlsdr_blog_v4)
 	{
-		rc = r82xx_write_reg_mask(priv, 0x0c, 0x08, 0x9f);
+                /* set fixed VGA gain based on frequency */
+                if (priv->rf_freq > MHZ(1500)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
+                }
+                else if (priv->rf_freq > MHZ(1000)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0b, 0x9f);
+                }
+                else {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x08, 0x9f); // 16.3 dB
+                }
 	}
 	else
 	{
-		rc = r82xx_write_reg_mask(priv, 0x0c, vga_gain_idx, 0x1f);
+                if (priv->rf_freq > MHZ(1500)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
+                }
+		else {
+			rc = r82xx_write_reg_mask(priv, 0x0c, vga_gain_idx, 0x1f);
+		}
 	}
 
 	if (rc < 0)
