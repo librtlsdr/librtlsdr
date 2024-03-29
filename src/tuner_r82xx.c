@@ -326,7 +326,7 @@ R0...R4 read, R5...R15 read/write, R16..R31 write
 /* Those initial values start from REG_SHADOW_START */
 static const uint8_t r82xx_init_array[] = {
 	0x80,	/* Reg 0x05 */
-	0x33,	/* Reg 0x06 */
+	0x30,	/* Reg 0x06 */
 	0x70,	/* Reg 0x07 */
 
 	0xc0,	/* Reg 0x08 */
