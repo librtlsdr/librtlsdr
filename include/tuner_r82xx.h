@@ -160,6 +160,7 @@ int r82xx_get_rf_gain(struct r82xx_priv *priv);
 int r82xx_get_if_gain(struct r82xx_priv *priv);
 
 int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control);
+int r82xx_set_vga_gain(struct r82xx_priv *priv, int vga_gain_idx);
 
 int r82xx_set_i2c_register(struct r82xx_priv *priv, unsigned i2c_register, unsigned data, unsigned mask);
 int r82xx_get_i2c_register(struct r82xx_priv *priv, unsigned char* data, int len);

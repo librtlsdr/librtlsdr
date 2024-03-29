@@ -326,7 +326,7 @@ R0...R4 read, R5...R15 read/write, R16..R31 write
 /* Those initial values start from REG_SHADOW_START */
 static const uint8_t r82xx_init_array[] = {
 	0x80,	/* Reg 0x05 */
-	0x13,	/* Reg 0x06 */
+	0x30,	/* Reg 0x06 */
 	0x70,	/* Reg 0x07 */
 
 	0xc0,	/* Reg 0x08 */
@@ -1508,7 +1508,6 @@ int r82xx_get_if_gain(struct r82xx_priv *priv)
 int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control)
 {
 	int rc = 0, vga_gain_idx = 0;
-	int is_rtlsdr_blog_v4;
 
 	if (rtl_vga_control)
 		*rtl_vga_control = 0;
@@ -1547,27 +1546,50 @@ int r82xx_set_if_mode(struct r82xx_priv *priv, int if_mode, int *rtl_vga_control
 		( (vga_gain_idx & 0x10) && rtl_vga_control ) ? "" : "de" );
 #endif
 
-	/* VGA auto control does not work on the V4, fix to an appropriate value instead like in Osmocom drivers
-	* Furthermore, this auto VGA needs to be looked at more closely, it appears to cause a lot of spectrum pumping
-	* and intermod on other devices. Fixed VGA gain always seems to yield better results.
-	*/
-	is_rtlsdr_blog_v4 = rtlsdr_check_dongle_model(priv->rtl_dev, "RTLSDRBlog", "Blog V4");
-	if(is_rtlsdr_blog_v4)
-	{
-		rc = r82xx_write_reg_mask(priv, 0x0c, 0x08, 0x9f);
-	}
-	else
-	{
-		rc = r82xx_write_reg_mask(priv, 0x0c, vga_gain_idx, 0x1f);
-	}
-
+	rc = r82xx_set_vga_gain(priv, vga_gain_idx);
 	if (rc < 0)
 		return rc;
+
 	priv->last_if_mode = if_mode;
 	priv->last_VGA_value = vga_gain_idx;
 	if ( (vga_gain_idx & 0x10) && rtl_vga_control )
 		*rtl_vga_control = 1;
 
+	return rc;
+}
+
+int r82xx_set_vga_gain(struct r82xx_priv *priv, int vga_gain_idx)
+{
+	int rc;
+	int is_rtlsdr_blog_v4;
+
+        /* VGA auto control does not work on the V4, fix to an appropriate value instead like in Osmocom drivers
+        * Furthermore, this auto VGA needs to be looked at more closely, it appears to cause a lot of spectrum pumping
+        * and intermod on other devices. Fixed VGA gain always seems to yield better results.
+        */
+        is_rtlsdr_blog_v4 = rtlsdr_check_dongle_model(priv->rtl_dev, "RTLSDRBlog", "Blog V4");
+        if(is_rtlsdr_blog_v4)
+        {
+                /* set fixed VGA gain based on frequency */
+                if (priv->rf_freq > MHZ(1350)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
+                }
+                else if (priv->rf_freq > MHZ(1000)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f);
+                }
+                else {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x08, 0x9f); // 16.3 dB
+                }
+        }
+        else
+        {
+                if (priv->rf_freq > MHZ(1350)) {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, 0x0f, 0x9f); // Max 40.5 dB
+                }
+                else {
+                        rc = r82xx_write_reg_mask(priv, 0x0c, vga_gain_idx, 0x1f);
+                }
+        }
 	return rc;
 }
 
@@ -2039,6 +2061,13 @@ int r82xx_set_freq64(struct r82xx_priv *priv, uint64_t freq)
 		if (rc < 0) {
 			if (priv->cfg->verbose)
 				fprintf(stderr, "r82xx_set_freq(): error at r82xx_set_mux()\n");
+			goto err;
+		}
+
+		rc = r82xx_set_vga_gain(priv, priv->last_VGA_value);
+		if (rc < 0) {
+			if (priv->cfg->verbose)
+				fprintf(stderr, "r82xx_set_freq(): error at r82xx_vga_gain()\n");
 			goto err;
 		}
 
